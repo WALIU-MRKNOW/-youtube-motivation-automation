@@ -1,1 +1,12 @@
-
+{
+  "name": "youtube-motivation-automation",
+  "version": "1.0.0",
+  "description": "AI-powered motivational YouTube Shorts automation",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
