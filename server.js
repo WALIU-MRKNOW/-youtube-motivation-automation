@@ -52,23 +52,22 @@ function writeCredentialsFile() {
         mode: 0o600
       }
     );
-  } catch (err) {
+  } catch (error) {
     console.error(
       "Unable to persist YouTube OAuth credentials:",
-      err.message
+      error.message
     );
   }
 }
 
-function saveTokens(tokens) {
+function saveTokens(tokens = {}) {
   ensureTokenDirectory();
 
-  if (!storedTokens) {
+  if (!storedTokens && fs.existsSync(TOKEN_PATH)) {
     try {
-      if (fs.existsSync(TOKEN_PATH)) {
-        const raw = fs.readFileSync(TOKEN_PATH, "utf8");
-        storedTokens = JSON.parse(raw);
-      }
+      storedTokens = JSON.parse(
+        fs.readFileSync(TOKEN_PATH, "utf8")
+      );
     } catch {
       storedTokens = {};
     }
@@ -76,7 +75,7 @@ function saveTokens(tokens) {
 
   const merged = {
     ...(storedTokens || {}),
-    ...(tokens || {})
+    ...tokens
   };
 
   storedTokens = merged;
@@ -89,22 +88,17 @@ function loadTokens() {
   try {
     ensureTokenDirectory();
 
-    // Migrate old token file if necessary.
     if (
       !fs.existsSync(TOKEN_PATH) &&
       fs.existsSync(LEGACY_TOKEN_FILE)
     ) {
       try {
-        const rawLegacy = fs.readFileSync(
-          LEGACY_TOKEN_FILE,
-          "utf8"
+        const legacy = JSON.parse(
+          fs.readFileSync(LEGACY_TOKEN_FILE, "utf8")
         );
 
-        const legacy = JSON.parse(rawLegacy);
-
-        oauth2Client.setCredentials(legacy);
         storedTokens = legacy;
-
+        oauth2Client.setCredentials(legacy);
         writeCredentialsFile();
 
         console.log(
@@ -113,7 +107,7 @@ function loadTokens() {
 
         return;
       } catch {
-        // Continue to normal token loading.
+        // Continue normally
       }
     }
 
@@ -125,19 +119,17 @@ function loadTokens() {
       return;
     }
 
-    const raw = fs.readFileSync(
-      TOKEN_PATH,
-      "utf8"
+    const savedTokens = JSON.parse(
+      fs.readFileSync(TOKEN_PATH, "utf8")
     );
 
-    const tokens = JSON.parse(raw);
-
-    storedTokens = tokens;
-    oauth2Client.setCredentials(tokens);
+    storedTokens = savedTokens;
+    oauth2Client.setCredentials(savedTokens);
 
     console.log(
       "Loaded saved YouTube OAuth credentials"
     );
+
   } catch (error) {
     console.error(
       "Unable to load saved YouTube credentials:",
@@ -153,6 +145,7 @@ oauth2Client.on("tokens", (tokens) => {
     console.log(
       "YouTube OAuth credentials refreshed."
     );
+
   } catch (error) {
     console.error(
       "Unable to persist refreshed OAuth credentials:",
@@ -162,6 +155,22 @@ oauth2Client.on("tokens", (tokens) => {
 });
 
 loadTokens();
+
+// ------------------------------------
+// System status
+// ------------------------------------
+
+function getSystemStatus() {
+  return {
+    connected: Boolean(storedTokens),
+    openaiConfigured: Boolean(
+      process.env.OPENAI_API_KEY
+    ),
+    persistentStorage:
+      fs.existsSync(path.dirname(TOKEN_PATH)),
+    server: "running"
+  };
+}
 
 // ------------------------------------
 // Main routes
@@ -183,9 +192,15 @@ app.get("/", (req, res) => {
     <p>
       OpenAI:
       <strong>
-        ${process.env.OPENAI_API_KEY ? "Configured ✅" : "Missing"}
+        ${
+          process.env.OPENAI_API_KEY
+            ? "Configured ✅"
+            : "Missing"
+        }
       </strong>
     </p>
+
+    <br>
 
     <a href="/auth/google">
       Connect YouTube
@@ -196,43 +211,25 @@ app.get("/", (req, res) => {
     <a href="/status">
       Check System Status
     </a>
+
+    <br><br>
+
+    <a href="/test-voice">
+      Test AI Voice
+    </a>
   `);
 });
 
 app.get("/health", (req, res) => {
-  const persistentStorage =
-    fs.existsSync(path.dirname(TOKEN_PATH));
-
-  res.json({
-    connected: Boolean(storedTokens),
-    openaiConfigured: Boolean(
-      process.env.OPENAI_API_KEY
-    ),
-    persistentStorage: Boolean(
-      persistentStorage
-    ),
-    server: "running"
-  });
+  res.json(getSystemStatus());
 });
 
 app.get("/status", (req, res) => {
-  const persistentStorage =
-    fs.existsSync(path.dirname(TOKEN_PATH));
-
-  res.json({
-    connected: Boolean(storedTokens),
-    openaiConfigured: Boolean(
-      process.env.OPENAI_API_KEY
-    ),
-    persistentStorage: Boolean(
-      persistentStorage
-    ),
-    server: "running"
-  });
+  res.json(getSystemStatus());
 });
 
 // ------------------------------------
-// AI motivational content generator
+// AI motivational script generator
 // ------------------------------------
 
 app.post("/generate-script", async (req, res) => {
@@ -259,47 +256,39 @@ app.post("/generate-script", async (req, res) => {
       model: "gpt-5-mini",
 
       instructions: `
-You create highly engaging original motivational
-YouTube Shorts.
+You create original motivational YouTube Shorts.
 
-Your writing should feel human, emotionally powerful,
-concise, modern and suitable for spoken narration.
+Writing must be:
+- concise
+- emotional
+- modern
+- natural when narrated
+- attention-grabbing immediately
 
-Never invent quotations from famous people.
-Never reproduce copyrighted song lyrics.
-Do not imitate a living person's voice or pretend the
-script was spoken by a celebrity.
-
-Make the first sentence immediately attention-grabbing.
-Avoid generic motivational filler.
-
-Create content optimized for a vertical short-form video.
+Never invent famous quotes.
+Never reproduce copyrighted lyrics.
+Never pretend celebrities said something they did not say.
       `,
 
       input: `
-Create one complete motivational YouTube Short package.
+Create one motivational YouTube Short package.
 
-TOPIC:
+Topic:
 ${topic}
 
-TONE:
+Tone:
 ${tone}
 
-TARGET LENGTH:
-Approximately ${duration} seconds when narrated.
+Target narration:
+Approximately ${duration} seconds.
 
-The script should:
-- have an immediate hook
-- use short spoken sentences
-- build emotional momentum
-- contain one clear core message
-- end with a memorable closing line or call to action
-
-Also create:
-- a YouTube Shorts title
-- an SEO-focused description
-- relevant hashtags
-- visual scene ideas for the future video generator
+Include:
+- hook
+- script
+- title
+- description
+- hashtags
+- visual suggestions
       `,
 
       text: {
@@ -366,7 +355,7 @@ Also create:
       response.output_text
     );
 
-    res.json({
+    return res.json({
       success: true,
       topic,
       tone,
@@ -380,10 +369,114 @@ Also create:
       error.message
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error:
         "Unable to generate motivational content."
+    });
+  }
+});
+
+// ------------------------------------
+// AI voice generator
+// ------------------------------------
+
+app.post("/generate-voice", async (req, res) => {
+  try {
+    const {
+      text,
+      voice = "onyx"
+    } = req.body || {};
+
+    if (!text) {
+      return res.status(400).json({
+        success: false,
+        error: "Text is required."
+      });
+    }
+
+    const speech = await openai.audio.speech.create({
+      model: "gpt-4o-mini-tts",
+      voice,
+      input: text,
+      instructions:
+        "Speak with a confident cinematic motivational tone. Use natural pauses and emotional emphasis without shouting.",
+      response_format: "mp3"
+    });
+
+    const audioBuffer = Buffer.from(
+      await speech.arrayBuffer()
+    );
+
+    res.setHeader(
+      "Content-Type",
+      "audio/mpeg"
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      'inline; filename="motivation-voice.mp3"'
+    );
+
+    return res.send(audioBuffer);
+
+  } catch (error) {
+    console.error(
+      "Voice generation failed:",
+      error.message
+    );
+
+    return res.status(500).json({
+      success: false,
+      error: "Unable to generate voiceover."
+    });
+  }
+});
+
+// ------------------------------------
+// Easy Safari voice test
+// ------------------------------------
+
+app.get("/test-voice", async (req, res) => {
+  try {
+    const speech = await openai.audio.speech.create({
+      model: "gpt-4o-mini-tts",
+      voice: "onyx",
+
+      input:
+        "Stop waiting to feel motivated. Discipline begins when the feeling disappears. Do the work today that your future self will thank you for.",
+
+      instructions:
+        "Speak with a confident cinematic motivational tone. Use natural pauses and emotional emphasis without shouting.",
+
+      response_format: "mp3"
+    });
+
+    const audioBuffer = Buffer.from(
+      await speech.arrayBuffer()
+    );
+
+    res.setHeader(
+      "Content-Type",
+      "audio/mpeg"
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      'inline; filename="motivation-test.mp3"'
+    );
+
+    return res.send(audioBuffer);
+
+  } catch (error) {
+    console.error(
+      "Test voice generation failed:",
+      error.message
+    );
+
+    return res.status(500).json({
+      success: false,
+      error: "Unable to generate test voice."
     });
   }
 });
@@ -426,21 +519,15 @@ app.get(
 
       saveTokens(tokens);
 
-      writeCredentialsFile();
-
       console.log(
         "YouTube OAuth connection successfully saved."
       );
 
-      res.send(`
+      return res.send(`
         <h1>✅ YouTube Connected</h1>
 
         <p>
           Your YouTube authorization has been saved.
-        </p>
-
-        <p>
-          The automation can now use your YouTube account.
         </p>
 
         <br>
@@ -456,7 +543,7 @@ app.get(
         error.message
       );
 
-      res
+      return res
         .status(500)
         .send(
           "YouTube authorization failed."
