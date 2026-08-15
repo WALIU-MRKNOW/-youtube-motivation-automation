@@ -14,32 +14,44 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: "1mb" }));
 
-// ----------------------------------------------------
-// OpenAI
-// ----------------------------------------------------
+// ====================================================
+// CONFIGURATION
+// ====================================================
+
+const TOKEN_PATH =
+  "/app/data/youtube-token.json";
+
+const LEGACY_TOKEN_FILE =
+  "/app/data/tokens.json";
+
+const HISTORY_PATH =
+  "/app/data/short-history.json";
+
+const MAX_HISTORY = 100;
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// ----------------------------------------------------
-// YouTube OAuth
-// ----------------------------------------------------
-
-const TOKEN_PATH = "/app/data/youtube-token.json";
-const LEGACY_TOKEN_FILE = "/app/data/tokens.json";
-
-const oauth2Client = new google.auth.OAuth2(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI
-);
+const oauth2Client =
+  new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_REDIRECT_URI
+  );
 
 let storedTokens = null;
 let lastUpload = null;
+let shortHistory = [];
+let activeJob = false;
 
-function ensureTokenDirectory() {
-  const dir = path.dirname(TOKEN_PATH);
+// ====================================================
+// PERSISTENT STORAGE
+// ====================================================
+
+function ensureDataDirectory() {
+  const dir =
+    path.dirname(TOKEN_PATH);
 
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, {
@@ -48,21 +60,35 @@ function ensureTokenDirectory() {
   }
 }
 
+function writeJsonSecure(
+  filePath,
+  data
+) {
+  ensureDataDirectory();
+
+  fs.writeFileSync(
+    filePath,
+    JSON.stringify(
+      data,
+      null,
+      2
+    ),
+    {
+      encoding: "utf8",
+      mode: 0o600
+    }
+  );
+}
+
+// ====================================================
+// YOUTUBE TOKENS
+// ====================================================
+
 function writeCredentialsFile() {
   try {
-    ensureTokenDirectory();
-
-    fs.writeFileSync(
+    writeJsonSecure(
       TOKEN_PATH,
-      JSON.stringify(
-        oauth2Client.credentials,
-        null,
-        2
-      ),
-      {
-        encoding: "utf8",
-        mode: 0o600
-      }
+      oauth2Client.credentials
     );
   } catch (error) {
     console.error(
@@ -72,20 +98,23 @@ function writeCredentialsFile() {
   }
 }
 
-function saveTokens(tokens = {}) {
-  ensureTokenDirectory();
+function saveTokens(
+  tokens = {}
+) {
+  ensureDataDirectory();
 
   if (
     !storedTokens &&
     fs.existsSync(TOKEN_PATH)
   ) {
     try {
-      storedTokens = JSON.parse(
-        fs.readFileSync(
-          TOKEN_PATH,
-          "utf8"
-        )
-      );
+      storedTokens =
+        JSON.parse(
+          fs.readFileSync(
+            TOKEN_PATH,
+            "utf8"
+          )
+        );
     } catch {
       storedTokens = {};
     }
@@ -107,10 +136,12 @@ function saveTokens(tokens = {}) {
 
 function loadTokens() {
   try {
-    ensureTokenDirectory();
+    ensureDataDirectory();
 
     if (
-      !fs.existsSync(TOKEN_PATH) &&
+      !fs.existsSync(
+        TOKEN_PATH
+      ) &&
       fs.existsSync(
         LEGACY_TOKEN_FILE
       )
@@ -123,26 +154,30 @@ function loadTokens() {
           )
         );
 
-      storedTokens = legacy;
+      storedTokens =
+        legacy;
 
-      oauth2Client.setCredentials(
-        legacy
-      );
+      oauth2Client
+        .setCredentials(
+          legacy
+        );
 
       writeCredentialsFile();
 
       console.log(
-        "Loaded saved YouTube OAuth credentials"
+        "Migrated legacy YouTube credentials."
       );
 
       return;
     }
 
     if (
-      !fs.existsSync(TOKEN_PATH)
+      !fs.existsSync(
+        TOKEN_PATH
+      )
     ) {
       console.log(
-        "No saved YouTube OAuth credentials found."
+        "No saved YouTube OAuth credentials."
       );
 
       return;
@@ -156,13 +191,15 @@ function loadTokens() {
         )
       );
 
-    oauth2Client.setCredentials(
-      storedTokens
-    );
+    oauth2Client
+      .setCredentials(
+        storedTokens
+      );
 
     console.log(
-      "Loaded saved YouTube OAuth credentials"
+      "Loaded saved YouTube OAuth credentials."
     );
+
   } catch (error) {
     console.error(
       "Unable to load YouTube credentials:",
@@ -173,7 +210,7 @@ function loadTokens() {
 
 oauth2Client.on(
   "tokens",
-  (tokens) => {
+  tokens => {
     try {
       saveTokens(tokens);
 
@@ -182,48 +219,108 @@ oauth2Client.on(
       );
     } catch (error) {
       console.error(
-        "Unable to persist refreshed OAuth credentials:",
+        "Unable to save refreshed credentials:",
         error.message
       );
     }
   }
 );
 
-loadTokens();
+// ====================================================
+// HISTORY
+// ====================================================
 
-// ----------------------------------------------------
-// Status
-// ----------------------------------------------------
+function loadHistory() {
+  try {
+    ensureDataDirectory();
 
-function getSystemStatus() {
-  return {
-    connected:
-      Boolean(storedTokens),
+    if (
+      !fs.existsSync(
+        HISTORY_PATH
+      )
+    ) {
+      shortHistory = [];
+      return;
+    }
 
-    openaiConfigured:
-      Boolean(
-        process.env.OPENAI_API_KEY
-      ),
+    shortHistory =
+      JSON.parse(
+        fs.readFileSync(
+          HISTORY_PATH,
+          "utf8"
+        )
+      );
 
-    pexelsConfigured:
-      Boolean(
-        process.env.PEXELS_API_KEY
-      ),
+    if (
+      !Array.isArray(
+        shortHistory
+      )
+    ) {
+      shortHistory = [];
+    }
 
-    persistentStorage:
-      fs.existsSync(
-        path.dirname(TOKEN_PATH)
-      ),
+    if (
+      shortHistory.length
+    ) {
+      lastUpload =
+        shortHistory[0];
+    }
 
-    server:
-      "running"
-  };
+  } catch (error) {
+    console.error(
+      "Unable to load history:",
+      error.message
+    );
+
+    shortHistory = [];
+  }
 }
 
-async function checkFfmpeg() {
+function saveHistory() {
+  try {
+    shortHistory =
+      shortHistory.slice(
+        0,
+        MAX_HISTORY
+      );
+
+    writeJsonSecure(
+      HISTORY_PATH,
+      shortHistory
+    );
+  } catch (error) {
+    console.error(
+      "Unable to save history:",
+      error.message
+    );
+  }
+}
+
+function addHistory(
+  entry
+) {
+  shortHistory.unshift(
+    entry
+  );
+
+  lastUpload = entry;
+
+  saveHistory();
+}
+
+loadTokens();
+loadHistory();
+
+// ====================================================
+// STATUS
+// ====================================================
+
+async function commandExists(
+  command
+) {
   try {
     await execFileAsync(
-      "ffmpeg",
+      command,
       ["-version"]
     );
 
@@ -233,9 +330,226 @@ async function checkFfmpeg() {
   }
 }
 
-// ----------------------------------------------------
-// AI content
-// ----------------------------------------------------
+async function checkFfmpeg() {
+  return commandExists(
+    "ffmpeg"
+  );
+}
+
+async function checkFfprobe() {
+  return commandExists(
+    "ffprobe"
+  );
+}
+
+function getSystemStatus() {
+  return {
+    server:
+      "running",
+
+    connected:
+      Boolean(
+        storedTokens
+      ),
+
+    openaiConfigured:
+      Boolean(
+        process.env
+          .OPENAI_API_KEY
+      ),
+
+    pexelsConfigured:
+      Boolean(
+        process.env
+          .PEXELS_API_KEY
+      ),
+
+    musicConfigured:
+      Boolean(
+        process.env
+          .BACKGROUND_MUSIC_URL
+      ),
+
+    automationConfigured:
+      Boolean(
+        process.env
+          .AUTOMATION_SECRET
+      ),
+
+    persistentStorage:
+      fs.existsSync(
+        path.dirname(
+          TOKEN_PATH
+        )
+      ),
+
+    activeJob,
+
+    jobs:
+      shortHistory.length
+  };
+}
+
+// ====================================================
+// RETRY
+// ====================================================
+
+async function retry(
+  fn,
+  {
+    attempts = 3,
+    delayMs = 1000,
+    label = "operation"
+  } = {}
+) {
+  let lastError;
+
+  for (
+    let attempt = 1;
+    attempt <= attempts;
+    attempt++
+  ) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+
+      console.error(
+        `${label} failed (${attempt}/${attempts}):`,
+        error.message
+      );
+
+      if (
+        attempt <
+        attempts
+      ) {
+        await new Promise(
+          resolve =>
+            setTimeout(
+              resolve,
+              delayMs *
+                attempt
+            )
+        );
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+// ====================================================
+// TOPIC HELPERS
+// ====================================================
+
+function normalizeTopic(
+  value
+) {
+  return String(
+    value || ""
+  )
+    .toLowerCase()
+    .replace(
+      /[^a-z0-9\s]/g,
+      " "
+    )
+    .replace(
+      /\s+/g,
+      " "
+    )
+    .trim();
+}
+
+function recentlyUsedTopic(
+  topic
+) {
+  const normalized =
+    normalizeTopic(topic);
+
+  if (!normalized) {
+    return false;
+  }
+
+  return shortHistory
+    .slice(0, 20)
+    .some(
+      item =>
+        normalizeTopic(
+          item.topic
+        ) === normalized
+    );
+}
+
+// ====================================================
+// AI CONTENT
+// ====================================================
+
+async function generateTopic() {
+  const recentTopics =
+    shortHistory
+      .slice(0, 15)
+      .map(
+        item =>
+          item.topic
+      )
+      .filter(Boolean);
+
+  const response =
+    await openai.responses.create({
+      model:
+        "gpt-5-mini",
+
+      instructions: `
+Create ONE concise motivational topic for a YouTube Short.
+
+The topic must be emotionally strong and specific.
+
+Avoid generic wording.
+
+Do not use famous quotations.
+
+Do not repeat any recent topic supplied by the user.
+
+Return only the topic text.
+      `,
+
+      input: `
+Recent topics to avoid:
+
+${recentTopics.length
+  ? recentTopics.join("\n")
+  : "None"}
+      `
+    });
+
+  return response.output_text
+    .trim()
+    .slice(0, 150);
+}
+
+async function generateUniqueTopic() {
+  for (
+    let attempt = 0;
+    attempt < 4;
+    attempt++
+  ) {
+    const topic =
+      await generateTopic();
+
+    if (
+      !recentlyUsedTopic(
+        topic
+      )
+    ) {
+      return topic;
+    }
+  }
+
+  return (
+    "Build discipline when nobody is watching " +
+    Date.now()
+  );
+}
 
 async function generateContent({
   topic,
@@ -244,36 +558,50 @@ async function generateContent({
 }) {
   const response =
     await openai.responses.create({
-      model: "gpt-5-mini",
+      model:
+        "gpt-5-mini",
 
       instructions: `
 You create high-retention original motivational YouTube Shorts.
 
-Write concise, emotional, cinematic narration.
+The narration must sound natural when spoken aloud.
+
+Use short sentences.
+Build emotional momentum.
+Avoid filler.
+Avoid clichés when possible.
+
+The first sentence must immediately grab attention.
 
 Never invent quotations from famous people.
-Never reproduce copyrighted lyrics.
+Never reproduce copyrighted song lyrics.
 Never pretend a celebrity said something they did not say.
 
-The opening sentence must immediately grab attention.
+The title must be clickable without being deceptive.
 
-Also create exactly four realistic stock-video search queries.
+The description should naturally explain the message.
 
-Each search query should describe a scene that could realistically exist as cinematic stock footage.
+Generate EXACTLY four realistic stock-footage search queries.
 
-Good examples:
-- man running alone sunrise
-- athlete training dark gym
-- person working late laptop
-- mountain sunrise silhouette
-- city walking alone night
-- boxer training heavy bag
+The stock queries must describe scenes that could realistically exist on a stock-video website.
 
-Avoid abstract searches such as:
-- success
-- motivation
-- become powerful
-- never give up
+Examples:
+
+man running alone sunrise
+athlete training dark gym
+person working late laptop
+man walking city at night
+mountain sunrise silhouette
+boxer training heavy bag
+woman studying alone night
+
+Do not create abstract stock queries such as:
+
+success
+motivation
+become powerful
+never give up
+winning mindset
       `,
 
       input: `
@@ -291,54 +619,78 @@ Approximately ${durationSeconds} seconds.
 Return:
 - hook
 - narration script
-- YouTube title
-- SEO description
+- YouTube Shorts title
+- SEO-friendly description
 - hashtags
-- exactly four cinematic stock-video search queries that visually follow the message
+- exactly four cinematic stock-video queries
       `,
 
       text: {
         format: {
-          type: "json_schema",
-          name: "motivational_short",
-          strict: true,
+          type:
+            "json_schema",
+
+          name:
+            "motivational_short",
+
+          strict:
+            true,
 
           schema: {
-            type: "object",
+            type:
+              "object",
 
             properties: {
               hook: {
-                type: "string"
+                type:
+                  "string"
               },
 
               script: {
-                type: "string"
+                type:
+                  "string"
               },
 
               title: {
-                type: "string"
+                type:
+                  "string"
               },
 
               description: {
-                type: "string"
+                type:
+                  "string"
               },
 
               hashtags: {
-                type: "array",
+                type:
+                  "array",
+
                 items: {
-                  type: "string"
+                  type:
+                    "string"
                 },
-                minItems: 3,
-                maxItems: 8
+
+                minItems:
+                  3,
+
+                maxItems:
+                  8
               },
 
               sceneQueries: {
-                type: "array",
+                type:
+                  "array",
+
                 items: {
-                  type: "string"
+                  type:
+                    "string"
                 },
-                minItems: 4,
-                maxItems: 4
+
+                minItems:
+                  4,
+
+                maxItems:
+                  4
               }
             },
 
@@ -363,9 +715,9 @@ Return:
   );
 }
 
-// ----------------------------------------------------
-// Voice
-// ----------------------------------------------------
+// ====================================================
+// VOICE
+// ====================================================
 
 async function generateVoice(
   text,
@@ -377,6 +729,8 @@ async function generateVoice(
         "gpt-4o-mini-tts",
 
       voice:
+        process.env
+          .OPENAI_TTS_VOICE ||
         "onyx",
 
       input:
@@ -385,7 +739,7 @@ async function generateVoice(
       instructions:
         "Speak with a confident cinematic motivational tone. " +
         "Use natural pauses and emotional emphasis. " +
-        "Sound powerful but do not shout.",
+        "Do not shout.",
 
       response_format:
         "mp3"
@@ -393,35 +747,41 @@ async function generateVoice(
 
   const buffer =
     Buffer.from(
-      await speech.arrayBuffer()
+      await speech
+        .arrayBuffer()
     );
 
-  await fs.promises.writeFile(
-    outputPath,
-    buffer
-  );
+  await fs.promises
+    .writeFile(
+      outputPath,
+      buffer
+    );
 }
 
-// ----------------------------------------------------
-// Pexels
-// ----------------------------------------------------
+// ====================================================
+// PEXELS
+// ====================================================
 
-function choosePexelsFile(video) {
+function choosePexelsFile(
+  video
+) {
   const candidates =
-    (video.video_files || [])
+    (
+      video.video_files ||
+      []
+    )
       .filter(
         file =>
           file.file_type ===
-          "video/mp4"
-      )
-      .filter(
-        file =>
+            "video/mp4" &&
           file.width &&
           file.height &&
           file.link
       );
 
-  if (!candidates.length) {
+  if (
+    !candidates.length
+  ) {
     return null;
   }
 
@@ -437,30 +797,22 @@ function choosePexelsFile(video) {
       ? portrait
       : candidates;
 
-  // Prefer something reasonably close to 720x1280
-  pool.sort((a, b) => {
-    const targetArea =
-      720 * 1280;
+  const targetArea =
+    720 * 1280;
 
-    const aDifference =
+  pool.sort(
+    (a, b) =>
       Math.abs(
         a.width *
           a.height -
           targetArea
-      );
-
-    const bDifference =
+      ) -
       Math.abs(
         b.width *
           b.height -
           targetArea
-      );
-
-    return (
-      aDifference -
-      bDifference
-    );
-  });
+      )
+  );
 
   return pool[0];
 }
@@ -470,7 +822,8 @@ async function searchPexelsVideo(
   usedVideoIds
 ) {
   if (
-    !process.env.PEXELS_API_KEY
+    !process.env
+      .PEXELS_API_KEY
   ) {
     throw new Error(
       "Pexels API is not configured."
@@ -479,7 +832,7 @@ async function searchPexelsVideo(
 
   const url =
     new URL(
-      "https://api.pexels.com/v1/videos/search"
+      "https://api.pexels.com/videos/search"
     );
 
   url.searchParams.set(
@@ -494,12 +847,12 @@ async function searchPexelsVideo(
 
   url.searchParams.set(
     "size",
-    "small"
+    "medium"
   );
 
   url.searchParams.set(
     "per_page",
-    "12"
+    "15"
   );
 
   const response =
@@ -508,7 +861,8 @@ async function searchPexelsVideo(
       {
         headers: {
           Authorization:
-            process.env.PEXELS_API_KEY
+            process.env
+              .PEXELS_API_KEY
         }
       }
     );
@@ -523,26 +877,28 @@ async function searchPexelsVideo(
     await response.json();
 
   const videos =
-    (data.videos || [])
+    (
+      data.videos ||
+      []
+    )
       .filter(
         video =>
-          !usedVideoIds.has(
-            video.id
-          )
+          !usedVideoIds
+            .has(video.id)
       )
       .filter(
         video =>
-          Number(video.duration) >
-          2
+          Number(
+            video.duration
+          ) >= 3
       );
 
   if (!videos.length) {
     return null;
   }
 
-  // Pick randomly among a few top results
   const shortlist =
-    videos.slice(0, 6);
+    videos.slice(0, 8);
 
   const video =
     shortlist[
@@ -600,19 +956,21 @@ async function downloadFile(
 
   if (!response.ok) {
     throw new Error(
-      `Unable to download stock clip (${response.status}).`
+      `Download failed (${response.status}).`
     );
   }
 
-  const data =
+  const buffer =
     Buffer.from(
-      await response.arrayBuffer()
+      await response
+        .arrayBuffer()
     );
 
-  await fs.promises.writeFile(
-    outputPath,
-    data
-  );
+  await fs.promises
+    .writeFile(
+      outputPath,
+      buffer
+    );
 }
 
 async function fetchSceneVideos(
@@ -620,12 +978,14 @@ async function fetchSceneVideos(
   workDir
 ) {
   const clips = [];
+
   const usedVideoIds =
     new Set();
 
   for (
     let i = 0;
-    i < sceneQueries.length;
+    i <
+    sceneQueries.length;
     i++
   ) {
     const query =
@@ -637,15 +997,25 @@ async function fetchSceneVideos(
       );
 
       const result =
-        await searchPexelsVideo(
-          query,
-          usedVideoIds
+        await retry(
+          () =>
+            searchPexelsVideo(
+              query,
+              usedVideoIds
+            ),
+          {
+            attempts:
+              2,
+
+            delayMs:
+              700,
+
+            label:
+              `Pexels ${query}`
+          }
         );
 
       if (!result) {
-        console.log(
-          `No suitable Pexels clip found for: ${query}`
-        );
         continue;
       }
 
@@ -655,13 +1025,22 @@ async function fetchSceneVideos(
           `pexels-${i}.mp4`
         );
 
-      console.log(
-        `Downloading Pexels clip ${i + 1}...`
-      );
+      await retry(
+        () =>
+          downloadFile(
+            result.downloadUrl,
+            filePath
+          ),
+        {
+          attempts:
+            2,
 
-      await downloadFile(
-        result.downloadUrl,
-        filePath
+          delayMs:
+            700,
+
+          label:
+            "Pexels download"
+        }
       );
 
       clips.push({
@@ -669,9 +1048,10 @@ async function fetchSceneVideos(
         query,
         filePath
       });
+
     } catch (error) {
       console.error(
-        `Pexels scene failed (${query}):`,
+        `Scene unavailable (${query}):`,
         error.message
       );
     }
@@ -680,12 +1060,12 @@ async function fetchSceneVideos(
   return clips;
 }
 
-// ----------------------------------------------------
-// Audio duration
-// ----------------------------------------------------
+// ====================================================
+// AUDIO / VIDEO HELPERS
+// ====================================================
 
-async function getAudioDuration(
-  audioPath
+async function getMediaDuration(
+  mediaPath
 ) {
   const { stdout } =
     await execFileAsync(
@@ -700,21 +1080,36 @@ async function getAudioDuration(
         "-of",
         "default=noprint_wrappers=1:nokey=1",
 
-        audioPath
+        mediaPath
       ]
     );
 
-  return Number(
-    stdout.trim()
-  );
+  const duration =
+    Number(
+      stdout.trim()
+    );
+
+  if (
+    !Number.isFinite(
+      duration
+    )
+  ) {
+    throw new Error(
+      "Unable to determine media duration."
+    );
+  }
+
+  return duration;
 }
 
-// ----------------------------------------------------
-// Captions
-// ----------------------------------------------------
+// ====================================================
+// CAPTIONS
+// ====================================================
 
-function escapeAssText(text) {
-  return text
+function escapeAssText(
+  text
+) {
+  return String(text)
     .replace(
       /\\/g,
       "\\\\"
@@ -743,24 +1138,23 @@ function secondsToAssTime(
 
   const mins =
     Math.floor(
-      (seconds % 3600) /
-        60
+      (
+        seconds %
+        3600
+      ) / 60
     );
 
   const secs =
     seconds % 60;
 
-  return `${hrs}:${String(
-    mins
-  ).padStart(
-    2,
-    "0"
-  )}:${secs
-    .toFixed(2)
-    .padStart(
-      5,
-      "0"
-    )}`;
+  return (
+    `${hrs}:` +
+    `${String(mins)
+      .padStart(2, "0")}:` +
+    `${secs
+      .toFixed(2)
+      .padStart(5, "0")}`
+  );
 }
 
 function createAssCaptions(
@@ -769,15 +1163,21 @@ function createAssCaptions(
   outputPath
 ) {
   const words =
-    script
+    String(script)
       .trim()
-      .split(/\s+/);
+      .split(/\s+/)
+      .filter(Boolean);
+
+  if (!words.length) {
+    throw new Error(
+      "Narration script is empty."
+    );
+  }
 
   const wordsPerCaption =
     4;
 
-  const chunks =
-    [];
+  const chunks = [];
 
   for (
     let i = 0;
@@ -810,7 +1210,9 @@ function createAssCaptions(
       const end =
         Math.min(
           duration,
-          (index + 1) *
+          (
+            index + 1
+          ) *
             chunkDuration
         );
 
@@ -829,10 +1231,11 @@ ScriptType: v4.00+
 PlayResX: 720
 PlayResY: 1280
 WrapStyle: 2
+ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,DejaVu Sans,52,&H00FFFFFF,&H000000FF,&H00000000,&H66000000,-1,0,0,0,100,100,0,0,1,4,2,2,55,55,230,1
+Style: Default,DejaVu Sans,54,&H00FFFFFF,&H000000FF,&H00000000,&H70000000,-1,0,0,0,100,100,0,0,1,5,2,2,60,60,240,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -845,9 +1248,9 @@ ${events}
   );
 }
 
-// ----------------------------------------------------
-// Prepare individual stock clips
-// ----------------------------------------------------
+// ====================================================
+// STOCK CLIP PREPARATION
+// ====================================================
 
 async function prepareSceneClip({
   inputPath,
@@ -871,7 +1274,12 @@ async function prepareSceneClip({
       "-an",
 
       "-vf",
-      "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30",
+      [
+        "scale=720:1280:force_original_aspect_ratio=increase",
+        "crop=720:1280",
+        "fps=30",
+        "eq=contrast=1.06:saturation=0.92:brightness=-0.02"
+      ].join(","),
 
       "-c:v",
       "libx264",
@@ -892,16 +1300,16 @@ async function prepareSceneClip({
     ],
     {
       maxBuffer:
-        10 *
+        20 *
         1024 *
         1024
     }
   );
 }
 
-// ----------------------------------------------------
-// Stitch scenes
-// ----------------------------------------------------
+// ====================================================
+// STITCH CLIPS
+// ====================================================
 
 async function stitchSceneClips(
   scenePaths,
@@ -951,153 +1359,299 @@ async function stitchSceneClips(
     ],
     {
       maxBuffer:
-        10 *
+        20 *
         1024 *
         1024
     }
   );
 }
 
-// ----------------------------------------------------
-// Cinematic final render
-// ----------------------------------------------------
+// ====================================================
+// OPTIONAL BACKGROUND MUSIC
+// ====================================================
+
+async function prepareBackgroundMusic(
+  workDir
+) {
+  const url =
+    process.env
+      .BACKGROUND_MUSIC_URL;
+
+  if (!url) {
+    return null;
+  }
+
+  const musicPath =
+    path.join(
+      workDir,
+      "background-music.mp3"
+    );
+
+  try {
+    await retry(
+      () =>
+        downloadFile(
+          url,
+          musicPath
+        ),
+      {
+        attempts:
+          2,
+
+        delayMs:
+          1000,
+
+        label:
+          "Background music download"
+      }
+    );
+
+    return musicPath;
+  } catch (error) {
+    console.error(
+      "Background music unavailable:",
+      error.message
+    );
+
+    return null;
+  }
+}
+
+// ====================================================
+// FINAL RENDER
+// ====================================================
 
 async function renderStockVideo({
   visualPath,
   audioPath,
   subtitlePath,
+  musicPath,
   videoPath
 }) {
+  const args = [
+    "-y",
+
+    "-i",
+    visualPath,
+
+    "-i",
+    audioPath
+  ];
+
+  if (musicPath) {
+    args.push(
+      "-stream_loop",
+      "-1",
+
+      "-i",
+      musicPath
+    );
+  }
+
+  args.push(
+    "-map",
+    "0:v:0"
+  );
+
+  if (musicPath) {
+    args.push(
+      "-filter_complex",
+
+      "[1:a]volume=1.0[voice];" +
+      "[2:a]volume=0.10[music];" +
+      "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[a]",
+
+      "-map",
+      "[a]"
+    );
+  } else {
+    args.push(
+      "-map",
+      "1:a:0"
+    );
+  }
+
+  args.push(
+    "-vf",
+    `subtitles=${subtitlePath}`,
+
+    "-c:v",
+    "libx264",
+
+    "-preset",
+    "veryfast",
+
+    "-crf",
+    "26",
+
+    "-threads",
+    "2",
+
+    "-pix_fmt",
+    "yuv420p",
+
+    "-c:a",
+    "aac",
+
+    "-b:a",
+    "128k",
+
+    "-ar",
+    "44100",
+
+    "-shortest",
+
+    "-movflags",
+    "+faststart",
+
+    videoPath
+  );
+
   await execFileAsync(
     "ffmpeg",
-    [
-      "-y",
+    args,
+    {
+      maxBuffer:
+        20 *
+        1024 *
+        1024
+    }
+  );
+}
+
+async function renderFallbackVideo({
+  audioPath,
+  subtitlePath,
+  musicPath,
+  videoPath
+}) {
+  const args = [
+    "-y",
+
+    "-f",
+    "lavfi",
+
+    "-i",
+    "color=c=0x090909:s=720x1280:r=30",
+
+    "-i",
+    audioPath
+  ];
+
+  if (musicPath) {
+    args.push(
+      "-stream_loop",
+      "-1",
 
       "-i",
-      visualPath,
+      musicPath
+    );
+  }
 
-      "-i",
-      audioPath,
+  if (musicPath) {
+    args.push(
+      "-filter_complex",
+
+      "[1:a]volume=1.0[voice];" +
+      "[2:a]volume=0.10[music];" +
+      "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[a]",
 
       "-map",
       "0:v:0",
 
       "-map",
-      "1:a:0",
+      "[a]"
+    );
+  } else {
+    args.push(
+      "-map",
+      "0:v:0",
 
-      "-vf",
-      `subtitles=${subtitlePath}`,
+      "-map",
+      "1:a:0"
+    );
+  }
 
-      "-c:v",
-      "libx264",
+  args.push(
+    "-vf",
+    `subtitles=${subtitlePath}`,
 
-      "-preset",
-      "veryfast",
+    "-c:v",
+    "libx264",
 
-      "-crf",
-      "26",
+    "-preset",
+    "veryfast",
 
-      "-threads",
-      "2",
+    "-crf",
+    "26",
 
-      "-pix_fmt",
-      "yuv420p",
+    "-threads",
+    "2",
 
-      "-c:a",
-      "aac",
+    "-pix_fmt",
+    "yuv420p",
 
-      "-b:a",
-      "96k",
+    "-c:a",
+    "aac",
 
-      "-shortest",
+    "-b:a",
+    "128k",
 
-      "-movflags",
-      "+faststart",
+    "-ar",
+    "44100",
 
-      videoPath
-    ],
-    {
-      maxBuffer:
-        10 *
-        1024 *
-        1024
-    }
+    "-shortest",
+
+    "-movflags",
+    "+faststart",
+
+    videoPath
   );
-}
 
-// ----------------------------------------------------
-// Fallback black-background renderer
-// ----------------------------------------------------
-
-async function renderFallbackVideo({
-  audioPath,
-  subtitlePath,
-  videoPath
-}) {
   await execFileAsync(
     "ffmpeg",
-    [
-      "-y",
-
-      "-f",
-      "lavfi",
-
-      "-i",
-      "color=c=0x090909:s=720x1280:r=30",
-
-      "-i",
-      audioPath,
-
-      "-vf",
-      `subtitles=${subtitlePath}`,
-
-      "-c:v",
-      "libx264",
-
-      "-preset",
-      "veryfast",
-
-      "-crf",
-      "26",
-
-      "-threads",
-      "2",
-
-      "-pix_fmt",
-      "yuv420p",
-
-      "-c:a",
-      "aac",
-
-      "-b:a",
-      "96k",
-
-      "-shortest",
-
-      "-movflags",
-      "+faststart",
-
-      videoPath
-    ],
+    args,
     {
       maxBuffer:
-        10 *
+        20 *
         1024 *
         1024
     }
   );
 }
 
-// ----------------------------------------------------
-// YouTube upload
-// ----------------------------------------------------
+// ====================================================
+// YOUTUBE
+// ====================================================
+
+function sanitizeHashtag(
+  value
+) {
+  const clean =
+    String(value)
+      .trim();
+
+  if (!clean) {
+    return "";
+  }
+
+  return clean.startsWith(
+    "#"
+  )
+    ? clean
+    : `#${clean.replace(
+        /\s+/g,
+        ""
+      )}`;
+}
 
 async function uploadToYouTube({
   videoPath,
   title,
   description,
   hashtags,
-  clips
+  clips,
+  privacyStatus
 }) {
   if (!storedTokens) {
     throw new Error(
@@ -1105,21 +1659,31 @@ async function uploadToYouTube({
     );
   }
 
-  oauth2Client.setCredentials(
-    storedTokens
-  );
+  oauth2Client
+    .setCredentials(
+      storedTokens
+    );
 
   const youtube =
     google.youtube({
-      version: "v3",
-      auth: oauth2Client
+      version:
+        "v3",
+
+      auth:
+        oauth2Client
     });
+
+  const cleanedHashtags =
+    hashtags
+      .map(
+        sanitizeHashtag
+      )
+      .filter(Boolean);
 
   let sourceCredits = "";
 
   if (
-    clips &&
-    clips.length
+    clips?.length
   ) {
     const credits =
       clips.map(
@@ -1128,7 +1692,7 @@ async function uploadToYouTube({
       );
 
     sourceCredits =
-      `\n\nFootage provided by Pexels:\n${credits.join(
+      `\n\nStock footage via Pexels:\n${credits.join(
         "\n"
       )}`;
   }
@@ -1136,71 +1700,636 @@ async function uploadToYouTube({
   const finalDescription =
     `${description}
 
-${hashtags.join(" ")}
+${cleanedHashtags.join(" ")}
 ${sourceCredits}`.trim();
 
   const result =
-    await youtube.videos.insert({
-      part: [
-        "snippet",
-        "status"
-      ],
+    await youtube
+      .videos
+      .insert({
+        part: [
+          "snippet",
+          "status"
+        ],
 
-      requestBody: {
-        snippet: {
-          title:
-            title.slice(
-              0,
-              100
-            ),
+        requestBody: {
+          snippet: {
+            title:
+              String(title)
+                .slice(
+                  0,
+                  100
+                ),
 
-          description:
-            finalDescription.slice(
-              0,
-              5000
-            ),
+            description:
+              finalDescription
+                .slice(
+                  0,
+                  5000
+                ),
 
-          tags:
-            hashtags
-              .map(
-                tag =>
-                  tag.replace(
-                    "#",
-                    ""
-                  )
-              )
-              .slice(
-                0,
-                15
-              ),
+            tags:
+              cleanedHashtags
+                .map(
+                  tag =>
+                    tag
+                      .replace(
+                        "#",
+                        ""
+                      )
+                )
+                .slice(
+                  0,
+                  15
+                ),
 
-          categoryId:
-            "22"
+            categoryId:
+              "22"
+          },
+
+          status: {
+            privacyStatus,
+
+            selfDeclaredMadeForKids:
+              false
+          }
         },
 
-        status: {
-          privacyStatus:
-            "private",
-
-          selfDeclaredMadeForKids:
-            false
+        media: {
+          body:
+            fs.createReadStream(
+              videoPath
+            )
         }
-      },
-
-      media: {
-        body:
-          fs.createReadStream(
-            videoPath
-          )
-      }
-    });
+      });
 
   return result.data.id;
 }
 
-// ----------------------------------------------------
-// Homepage
-// ----------------------------------------------------
+// ====================================================
+// YOUTUBE ANALYTICS
+// ====================================================
+
+async function getVideoAnalytics(
+  videoId
+) {
+  if (!storedTokens) {
+    throw new Error(
+      "YouTube is not connected."
+    );
+  }
+
+  oauth2Client
+    .setCredentials(
+      storedTokens
+    );
+
+  const youtube =
+    google.youtube({
+      version:
+        "v3",
+
+      auth:
+        oauth2Client
+    });
+
+  const result =
+    await youtube
+      .videos
+      .list({
+        part: [
+          "snippet",
+          "statistics",
+          "status"
+        ],
+
+        id: [
+          videoId
+        ]
+      });
+
+  const video =
+    result.data
+      .items?.[0];
+
+  if (!video) {
+    return null;
+  }
+
+  return {
+    videoId,
+
+    title:
+      video.snippet
+        ?.title,
+
+    publishedAt:
+      video.snippet
+        ?.publishedAt,
+
+    privacyStatus:
+      video.status
+        ?.privacyStatus,
+
+    views:
+      Number(
+        video.statistics
+          ?.viewCount ||
+          0
+      ),
+
+    likes:
+      Number(
+        video.statistics
+          ?.likeCount ||
+          0
+      ),
+
+    comments:
+      Number(
+        video.statistics
+          ?.commentCount ||
+          0
+      )
+  };
+}
+
+// ====================================================
+// CORE SHORT CREATOR
+// ====================================================
+
+async function createShort({
+  topic,
+  tone =
+    "powerful, cinematic and direct",
+  durationSeconds =
+    30,
+  privacyStatus =
+    "private"
+} = {}) {
+  if (activeJob) {
+    throw new Error(
+      "Another Short is already being generated."
+    );
+  }
+
+  if (
+    !process.env
+      .OPENAI_API_KEY
+  ) {
+    throw new Error(
+      "OpenAI API is not configured."
+    );
+  }
+
+  if (!storedTokens) {
+    throw new Error(
+      "YouTube is not connected."
+    );
+  }
+
+  if (
+    !(await checkFfmpeg())
+  ) {
+    throw new Error(
+      "FFmpeg is not installed."
+    );
+  }
+
+  if (
+    !(await checkFfprobe())
+  ) {
+    throw new Error(
+      "FFprobe is not installed."
+    );
+  }
+
+  const allowedPrivacy =
+    [
+      "private",
+      "unlisted",
+      "public"
+    ];
+
+  if (
+    !allowedPrivacy
+      .includes(
+        privacyStatus
+      )
+  ) {
+    privacyStatus =
+      "private";
+  }
+
+  activeJob = true;
+
+  const jobId =
+    `${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+
+  const workDir =
+    path.join(
+      os.tmpdir(),
+      `short-${jobId}`
+    );
+
+  try {
+    await fs.promises
+      .mkdir(
+        workDir,
+        {
+          recursive:
+            true
+        }
+      );
+
+    const finalTopic =
+      topic?.trim()
+        ? String(topic)
+            .trim()
+            .slice(
+              0,
+              150
+            )
+        : await generateUniqueTopic();
+
+    const duration =
+      Math.min(
+        Math.max(
+          Number(
+            durationSeconds
+          ) || 30,
+          15
+        ),
+        60
+      );
+
+    console.log(
+      `JOB ${jobId}`
+    );
+
+    console.log(
+      `Topic: ${finalTopic}`
+    );
+
+    const audioPath =
+      path.join(
+        workDir,
+        "voice.mp3"
+      );
+
+    const subtitlePath =
+      path.join(
+        workDir,
+        "captions.ass"
+      );
+
+    const visualPath =
+      path.join(
+        workDir,
+        "visuals.mp4"
+      );
+
+    const videoPath =
+      path.join(
+        workDir,
+        "short.mp4"
+      );
+
+    // --------------------------------
+    // 1. Content
+    // --------------------------------
+
+    console.log(
+      "1/8 Generating content..."
+    );
+
+    const content =
+      await retry(
+        () =>
+          generateContent({
+            topic:
+              finalTopic,
+
+            tone,
+
+            durationSeconds:
+              duration
+          }),
+        {
+          attempts:
+            2,
+
+          delayMs:
+            1000,
+
+          label:
+            "Content generation"
+        }
+      );
+
+    // --------------------------------
+    // 2. Voice
+    // --------------------------------
+
+    console.log(
+      "2/8 Generating narration..."
+    );
+
+    await retry(
+      () =>
+        generateVoice(
+          content.script,
+          audioPath
+        ),
+      {
+        attempts:
+          2,
+
+        delayMs:
+          1000,
+
+        label:
+          "Voice generation"
+      }
+    );
+
+    // --------------------------------
+    // 3. Duration
+    // --------------------------------
+
+    const actualDuration =
+      await getMediaDuration(
+        audioPath
+      );
+
+    console.log(
+      `Narration: ${actualDuration.toFixed(
+        2
+      )} seconds`
+    );
+
+    // --------------------------------
+    // 4. Captions
+    // --------------------------------
+
+    console.log(
+      "3/8 Creating captions..."
+    );
+
+    createAssCaptions(
+      content.script,
+      actualDuration,
+      subtitlePath
+    );
+
+    // --------------------------------
+    // 5. Stock footage
+    // --------------------------------
+
+    let clips = [];
+
+    if (
+      process.env
+        .PEXELS_API_KEY
+    ) {
+      console.log(
+        "4/8 Finding cinematic footage..."
+      );
+
+      clips =
+        await fetchSceneVideos(
+          content.sceneQueries,
+          workDir
+        );
+    }
+
+    // --------------------------------
+    // 6. Background music
+    // --------------------------------
+
+    console.log(
+      "5/8 Preparing background music..."
+    );
+
+    const musicPath =
+      await prepareBackgroundMusic(
+        workDir
+      );
+
+    // --------------------------------
+    // 7. Video
+    // --------------------------------
+
+    let visualMode =
+      "fallback";
+
+    if (clips.length) {
+      console.log(
+        `Using ${clips.length} stock clip(s).`
+      );
+
+      const sceneDuration =
+        actualDuration /
+        clips.length;
+
+      const prepared =
+        [];
+
+      for (
+        let i = 0;
+        i < clips.length;
+        i++
+      ) {
+        const preparedPath =
+          path.join(
+            workDir,
+            `scene-${i}.mp4`
+          );
+
+        console.log(
+          `6/8 Preparing scene ${i + 1}/${clips.length}...`
+        );
+
+        await prepareSceneClip({
+          inputPath:
+            clips[i]
+              .filePath,
+
+          outputPath:
+            preparedPath,
+
+          duration:
+            sceneDuration
+        });
+
+        prepared.push(
+          preparedPath
+        );
+      }
+
+      console.log(
+        "7/8 Stitching + rendering..."
+      );
+
+      await stitchSceneClips(
+        prepared,
+        visualPath,
+        workDir
+      );
+
+      await renderStockVideo({
+        visualPath,
+        audioPath,
+        subtitlePath,
+        musicPath,
+        videoPath
+      });
+
+      visualMode =
+        "pexels";
+
+    } else {
+      console.log(
+        "7/8 Rendering fallback video..."
+      );
+
+      await renderFallbackVideo({
+        audioPath,
+        subtitlePath,
+        musicPath,
+        videoPath
+      });
+    }
+
+    // --------------------------------
+    // 8. Upload
+    // --------------------------------
+
+    console.log(
+      `8/8 Uploading to YouTube as ${privacyStatus}...`
+    );
+
+    const youtubeVideoId =
+      await retry(
+        () =>
+          uploadToYouTube({
+            videoPath,
+
+            title:
+              content.title,
+
+            description:
+              content.description,
+
+            hashtags:
+              content.hashtags,
+
+            clips,
+
+            privacyStatus
+          }),
+        {
+          attempts:
+            2,
+
+          delayMs:
+            1500,
+
+          label:
+            "YouTube upload"
+        }
+      );
+
+    const entry = {
+      jobId,
+
+      videoId:
+        youtubeVideoId,
+
+      topic:
+        finalTopic,
+
+      title:
+        content.title,
+
+      createdAt:
+        new Date()
+          .toISOString(),
+
+      privacyStatus,
+
+      visualMode,
+
+      stockClips:
+        clips.length,
+
+      music:
+        Boolean(
+          musicPath
+        )
+    };
+
+    addHistory(entry);
+
+    console.log(
+      `SUCCESS: ${youtubeVideoId}`
+    );
+
+    return {
+      success:
+        true,
+
+      youtubeVideoId,
+
+      youtubeUrl:
+        `https://www.youtube.com/watch?v=${youtubeVideoId}`,
+
+      topic:
+        finalTopic,
+
+      privacyStatus,
+
+      visualMode,
+
+      stockClipsUsed:
+        clips.length,
+
+      musicUsed:
+        Boolean(
+          musicPath
+        ),
+
+      durationSeconds:
+        actualDuration,
+
+      content
+    };
+
+  } finally {
+    activeJob = false;
+
+    fs.promises
+      .rm(
+        workDir,
+        {
+          recursive:
+            true,
+
+          force:
+            true
+        }
+      )
+      .catch(
+        () => {}
+      );
+  }
+}
+
+// ====================================================
+// HOMEPAGE
+// ====================================================
 
 app.get(
   "/",
@@ -1209,6 +2338,7 @@ app.get(
 <!doctype html>
 
 <html>
+
 <head>
 
 <meta
@@ -1217,55 +2347,168 @@ content="width=device-width,initial-scale=1"
 />
 
 <title>
-Motivation Shorts Engine
+Automatic Shorts Engine
 </title>
 
 <style>
 
+* {
+  box-sizing: border-box;
+}
+
 body {
-  font-family: Arial, sans-serif;
-  max-width: 700px;
-  margin: 40px auto;
-  padding: 20px;
-  background: #090909;
-  color: white;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Arial,
+    sans-serif;
+
+  max-width:
+    720px;
+
+  margin:
+    0 auto;
+
+  padding:
+    32px 20px 60px;
+
+  background:
+    #080808;
+
+  color:
+    white;
+}
+
+h1 {
+  margin-bottom:
+    8px;
+}
+
+.subtitle {
+  color:
+    #aaa;
+
+  margin-top:
+    0;
+}
+
+.card {
+  background:
+    #121212;
+
+  border:
+    1px solid #282828;
+
+  border-radius:
+    16px;
+
+  padding:
+    18px;
+
+  margin-top:
+    18px;
 }
 
 .status {
-  line-height: 1.8;
+  line-height:
+    2;
+}
+
+.ok {
+  color:
+    #70ff9d;
+}
+
+.bad {
+  color:
+    #ff7979;
+}
+
+label {
+  display:
+    block;
+
+  margin-top:
+    14px;
+
+  margin-bottom:
+    6px;
+
+  color:
+    #bbb;
 }
 
 input,
+select,
 button {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 15px;
-  margin-top: 14px;
-  font-size: 16px;
-  border-radius: 9px;
+  width:
+    100%;
+
+  padding:
+    15px;
+
+  font-size:
+    16px;
+
+  border-radius:
+    10px;
 }
 
-input {
-  background: #171717;
-  border: 1px solid #444;
-  color: white;
+input,
+select {
+  background:
+    #181818;
+
+  color:
+    white;
+
+  border:
+    1px solid #444;
 }
 
 button {
-  background: white;
-  color: black;
-  font-weight: bold;
-  border: none;
+  margin-top:
+    18px;
+
+  border:
+    none;
+
+  background:
+    white;
+
+  color:
+    black;
+
+  font-weight:
+    800;
+
+  cursor:
+    pointer;
 }
 
 button:disabled {
-  opacity: .5;
+  opacity:
+    .45;
 }
 
-#result {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin-top: 24px;
+pre {
+  white-space:
+    pre-wrap;
+
+  overflow-wrap:
+    anywhere;
+
+  font-size:
+    13px;
+
+  line-height:
+    1.5;
+}
+
+a {
+  color:
+    white;
 }
 
 </style>
@@ -1275,73 +2518,238 @@ button:disabled {
 <body>
 
 <h1>
-Cinematic Shorts Engine 🎥⚡
+Automatic Shorts Engine 🎥⚡
 </h1>
 
-<div class="status">
+<p class="subtitle">
+AI → Voice → Stock footage → Captions → Music → YouTube
+</p>
+
+<div class="card status">
+
+<strong>
+System
+</strong>
+
+<br>
 
 YouTube:
-<strong>
-${storedTokens
-  ? "Connected ✅"
-  : "Not connected"}
-</strong>
+<span class="${
+  storedTokens
+    ? "ok"
+    : "bad"
+}">
+${
+  storedTokens
+    ? "Connected ✅"
+    : "Not connected ❌"
+}
+</span>
 
 <br>
 
 OpenAI:
-<strong>
-${process.env.OPENAI_API_KEY
-  ? "Configured ✅"
-  : "Missing"}
-</strong>
+<span class="${
+  process.env
+    .OPENAI_API_KEY
+    ? "ok"
+    : "bad"
+}">
+${
+  process.env
+    .OPENAI_API_KEY
+    ? "Configured ✅"
+    : "Missing ❌"
+}
+</span>
 
 <br>
 
 Pexels:
+<span class="${
+  process.env
+    .PEXELS_API_KEY
+    ? "ok"
+    : "bad"
+}">
+${
+  process.env
+    .PEXELS_API_KEY
+    ? "Configured ✅"
+    : "Missing ❌"
+}
+</span>
+
+<br>
+
+Music:
+<span class="${
+  process.env
+    .BACKGROUND_MUSIC_URL
+    ? "ok"
+    : ""
+}">
+${
+  process.env
+    .BACKGROUND_MUSIC_URL
+    ? "Configured ✅"
+    : "Optional"
+}
+</span>
+
+<br>
+
+Automation:
+<span class="${
+  process.env
+    .AUTOMATION_SECRET
+    ? "ok"
+    : ""
+}">
+${
+  process.env
+    .AUTOMATION_SECRET
+    ? "Ready ✅"
+    : "Not configured"
+}
+</span>
+
+<br>
+
+Completed jobs:
 <strong>
-${process.env.PEXELS_API_KEY
-  ? "Configured ✅"
-  : "Missing"}
+${shortHistory.length}
 </strong>
 
 </div>
 
+<div class="card">
+
+<label>
+Topic
+</label>
+
 <input
 id="topic"
-value="Nobody is coming to save you"
-placeholder="Motivational topic"
+placeholder="Leave blank for AI to choose a topic"
 />
+
+<label>
+Duration
+</label>
+
+<select
+id="duration"
+>
+<option value="20">
+20 seconds
+</option>
+
+<option
+value="30"
+selected
+>
+30 seconds
+</option>
+
+<option value="45">
+45 seconds
+</option>
+
+<option value="60">
+60 seconds
+</option>
+</select>
+
+<label>
+YouTube visibility
+</label>
+
+<select
+id="privacy"
+>
+<option
+value="private"
+selected
+>
+Private
+</option>
+
+<option value="unlisted">
+Unlisted
+</option>
+
+<option value="public">
+Public
+</option>
+</select>
 
 <button
 id="generateButton"
-onclick="createShort()"
+onclick="createVideo()"
 >
-Generate Cinematic Private Short
+Generate YouTube Short
 </button>
 
-<pre id="result"></pre>
+</div>
+
+<div class="card">
+
+<strong>
+Result
+</strong>
+
+<pre id="result">
+Ready.
+</pre>
+
+</div>
 
 <script>
 
-async function createShort() {
-
-  const result =
-    document.getElementById(
-      "result"
-    );
+async function createVideo() {
 
   const button =
     document.getElementById(
       "generateButton"
     );
 
-  button.disabled = true;
+  const result =
+    document.getElementById(
+      "result"
+    );
+
+  button.disabled =
+    true;
 
   result.textContent =
-    "Creating script → voice → finding cinematic footage → captions → rendering → YouTube upload...";
+    "Generating content → narration → stock footage → captions → music → video → YouTube...";
 
   try {
+
+    const topic =
+      document
+        .getElementById(
+          "topic"
+        )
+        .value
+        .trim();
+
+    const durationSeconds =
+      Number(
+        document
+          .getElementById(
+            "duration"
+          )
+          .value
+      );
+
+    const privacyStatus =
+      document
+        .getElementById(
+          "privacy"
+        )
+        .value;
 
     const response =
       await fetch(
@@ -1358,17 +2766,18 @@ async function createShort() {
           body:
             JSON.stringify({
               topic:
-                document
-                .getElementById(
-                  "topic"
-                )
-                .value
+                topic || undefined,
+
+              durationSeconds,
+
+              privacyStatus
             })
         }
       );
 
     const data =
-      await response.json();
+      await response
+        .json();
 
     result.textContent =
       JSON.stringify(
@@ -1392,14 +2801,24 @@ async function createShort() {
 </script>
 
 </body>
+
 </html>
     `);
   }
 );
 
-// ----------------------------------------------------
-// Status endpoints
-// ----------------------------------------------------
+// ====================================================
+// STATUS ROUTES
+// ====================================================
+
+app.get(
+  "/health",
+  (req, res) => {
+    res.json(
+      getSystemStatus()
+    );
+  }
+);
 
 app.get(
   "/status",
@@ -1408,17 +2827,13 @@ app.get(
       ...getSystemStatus(),
 
       ffmpeg:
-        await checkFfmpeg()
-    });
-  }
-);
+        await checkFfmpeg(),
 
-app.get(
-  "/health",
-  (req, res) => {
-    res.json(
-      getSystemStatus()
-    );
+      ffprobe:
+        await checkFfprobe(),
+
+      lastUpload
+    });
   }
 );
 
@@ -1431,9 +2846,73 @@ app.get(
   }
 );
 
-// ----------------------------------------------------
-// Pexels test — FREE test before generating
-// ----------------------------------------------------
+app.get(
+  "/history",
+  (req, res) => {
+    res.json({
+      count:
+        shortHistory.length,
+
+      history:
+        shortHistory
+    });
+  }
+);
+
+// ====================================================
+// ANALYTICS
+// ====================================================
+
+app.get(
+  "/analytics/:videoId",
+  async (req, res) => {
+    try {
+      const data =
+        await getVideoAnalytics(
+          req.params.videoId
+        );
+
+      if (!data) {
+        return res
+          .status(404)
+          .json({
+            success:
+              false,
+
+            error:
+              "Video not found."
+          });
+      }
+
+      return res.json({
+        success:
+          true,
+
+        data
+      });
+
+    } catch (error) {
+      console.error(
+        "Analytics failed:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          success:
+            false,
+
+          error:
+            error.message
+        });
+    }
+  }
+);
+
+// ====================================================
+// PEXELS TEST
+// ====================================================
 
 app.get(
   "/test-pexels",
@@ -1442,11 +2921,13 @@ app.get(
       const query =
         String(
           req.query.q ||
-          "athlete training"
-        ).slice(
-          0,
-          100
-        );
+            "athlete training"
+        )
+          .trim()
+          .slice(
+            0,
+            100
+          );
 
       const result =
         await searchPexelsVideo(
@@ -1480,6 +2961,7 @@ app.get(
               }
             : null
       });
+
     } catch (error) {
       return res
         .status(500)
@@ -1494,380 +2976,40 @@ app.get(
   }
 );
 
-// ----------------------------------------------------
-// FULL CINEMATIC SHORT PIPELINE
-// ----------------------------------------------------
-
-app.post(
-  "/create-short",
-  async (req, res) => {
-    const jobId =
-      `${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
-
-    const workDir =
-      path.join(
-        os.tmpdir(),
-        `short-${jobId}`
-      );
-
-    try {
-      if (
-        !process.env.OPENAI_API_KEY
-      ) {
-        return res
-          .status(500)
-          .json({
-            success: false,
-            error:
-              "OpenAI API is not configured."
-          });
-      }
-
-      if (!storedTokens) {
-        return res
-          .status(401)
-          .json({
-            success:
-              false,
-
-            error:
-              "YouTube is not connected."
-          });
-      }
-
-      if (
-        !(await checkFfmpeg())
-      ) {
-        return res
-          .status(500)
-          .json({
-            success:
-              false,
-
-            error:
-              "FFmpeg is not installed."
-          });
-      }
-
-      const {
-        topic =
-          "discipline and consistency",
-
-        tone =
-          "powerful, cinematic and direct",
-
-        durationSeconds =
-          30
-      } = req.body || {};
-
-      const duration =
-        Math.min(
-          Math.max(
-            Number(
-              durationSeconds
-            ) || 30,
-            15
-          ),
-          60
-        );
-
-      await fs.promises.mkdir(
-        workDir,
-        {
-          recursive: true
-        }
-      );
-
-      const audioPath =
-        path.join(
-          workDir,
-          "voice.mp3"
-        );
-
-      const subtitlePath =
-        path.join(
-          workDir,
-          "captions.ass"
-        );
-
-      const visualPath =
-        path.join(
-          workDir,
-          "visuals.mp4"
-        );
-
-      const videoPath =
-        path.join(
-          workDir,
-          "short.mp4"
-        );
-
-      console.log(
-        "1/7 Generating content..."
-      );
-
-      const content =
-        await generateContent({
-          topic,
-          tone,
-          durationSeconds:
-            duration
-        });
-
-      console.log(
-        "2/7 Generating narration..."
-      );
-
-      await generateVoice(
-        content.script,
-        audioPath
-      );
-
-      const actualDuration =
-        await getAudioDuration(
-          audioPath
-        );
-
-      console.log(
-        `Narration duration: ${actualDuration.toFixed(
-          2
-        )} seconds`
-      );
-
-      console.log(
-        "3/7 Creating captions..."
-      );
-
-      createAssCaptions(
-        content.script,
-        actualDuration,
-        subtitlePath
-      );
-
-      let clips = [];
-
-      if (
-        process.env.PEXELS_API_KEY
-      ) {
-        console.log(
-          "4/7 Finding Pexels footage..."
-        );
-
-        clips =
-          await fetchSceneVideos(
-            content.sceneQueries,
-            workDir
-          );
-      }
-
-      let visualMode =
-        "fallback";
-
-      if (clips.length) {
-        console.log(
-          `Found ${clips.length} usable cinematic clip(s).`
-        );
-
-        const sceneDuration =
-          actualDuration /
-          clips.length;
-
-        const prepared =
-          [];
-
-        for (
-          let i = 0;
-          i < clips.length;
-          i++
-        ) {
-          console.log(
-            `Preparing scene ${i + 1}/${clips.length}...`
-          );
-
-          const preparedPath =
-            path.join(
-              workDir,
-              `scene-${i}.mp4`
-            );
-
-          await prepareSceneClip({
-            inputPath:
-              clips[i].filePath,
-
-            outputPath:
-              preparedPath,
-
-            duration:
-              sceneDuration
-          });
-
-          prepared.push(
-            preparedPath
-          );
-        }
-
-        console.log(
-          "5/7 Stitching cinematic scenes..."
-        );
-
-        await stitchSceneClips(
-          prepared,
-          visualPath,
-          workDir
-        );
-
-        console.log(
-          "6/7 Rendering captions + narration..."
-        );
-
-        await renderStockVideo({
-          visualPath,
-          audioPath,
-          subtitlePath,
-          videoPath
-        });
-
-        visualMode =
-          "pexels";
-      } else {
-        console.log(
-          "No usable stock clips. Using fallback visual."
-        );
-
-        console.log(
-          "6/7 Rendering fallback..."
-        );
-
-        await renderFallbackVideo({
-          audioPath,
-          subtitlePath,
-          videoPath
-        });
-      }
-
-      console.log(
-        "7/7 Uploading privately to YouTube..."
-      );
-
-      const youtubeVideoId =
-        await uploadToYouTube({
-          videoPath,
-
-          title:
-            content.title,
-
-          description:
-            content.description,
-
-          hashtags:
-            content.hashtags,
-
-          clips
-        });
-
-      lastUpload = {
-        videoId:
-          youtubeVideoId,
-
-        title:
-          content.title,
-
-        createdAt:
-          new Date()
-            .toISOString(),
-
-        privacyStatus:
-          "private",
-
-        visualMode,
-
-        stockClips:
-          clips.length
-      };
-
-      console.log(
-        "Cinematic private Short uploaded successfully."
-      );
-
-      return res.json({
-        success:
-          true,
-
-        youtubeVideoId,
-
-        privacyStatus:
-          "private",
-
-        visualMode,
-
-        stockClipsUsed:
-          clips.length,
-
-        content
-      });
-    } catch (error) {
-      console.error(
-        "Create short failed:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          success:
-            false,
-
-          error:
-            error.message ||
-            "Unable to create Short."
-        });
-    } finally {
-      fs.promises
-        .rm(
-          workDir,
-          {
-            recursive: true,
-            force: true
-          }
-        )
-        .catch(
-          () => {}
-        );
-    }
-  }
-);
-
-// ----------------------------------------------------
-// Voice test
-// ----------------------------------------------------
+// ====================================================
+// VOICE TEST
+// ====================================================
 
 app.get(
   "/test-voice",
   async (req, res) => {
     try {
       const speech =
-        await openai.audio.speech.create({
-          model:
-            "gpt-4o-mini-tts",
+        await openai.audio
+          .speech
+          .create({
+            model:
+              "gpt-4o-mini-tts",
 
-          voice:
-            "onyx",
+            voice:
+              process.env
+                .OPENAI_TTS_VOICE ||
+              "onyx",
 
-          input:
-            "Discipline begins when motivation disappears.",
+            input:
+              "Discipline begins when motivation disappears.",
 
-          instructions:
-            "Speak with a confident cinematic motivational tone.",
+            instructions:
+              "Speak with a confident cinematic motivational tone.",
 
-          response_format:
-            "mp3"
-        });
+            response_format:
+              "mp3"
+          });
 
       const buffer =
         Buffer.from(
-          await speech.arrayBuffer()
+          await speech
+            .arrayBuffer()
         );
 
       res.setHeader(
@@ -1878,7 +3020,13 @@ app.get(
       return res.send(
         buffer
       );
+
     } catch (error) {
+      console.error(
+        "Voice test failed:",
+        error.message
+      );
+
       return res
         .status(500)
         .json({
@@ -1886,34 +3034,195 @@ app.get(
             false,
 
           error:
-            "Unable to generate test voice."
+            error.message
         });
     }
   }
 );
 
-// ----------------------------------------------------
-// Google OAuth
-// ----------------------------------------------------
+// ====================================================
+// MANUAL CREATE
+// ====================================================
+
+app.post(
+  "/create-short",
+  async (req, res) => {
+    try {
+      const result =
+        await createShort({
+          topic:
+            req.body
+              ?.topic,
+
+          tone:
+            req.body
+              ?.tone,
+
+          durationSeconds:
+            req.body
+              ?.durationSeconds,
+
+          privacyStatus:
+            req.body
+              ?.privacyStatus ||
+            "private"
+        });
+
+      return res.json(
+        result
+      );
+
+    } catch (error) {
+      console.error(
+        "Create short failed:",
+        error.message
+      );
+
+      const status =
+        error.message
+          .includes(
+            "already being generated"
+          )
+          ? 409
+          : 500;
+
+      return res
+        .status(status)
+        .json({
+          success:
+            false,
+
+          error:
+            error.message ||
+            "Unable to create Short."
+        });
+    }
+  }
+);
+
+// ====================================================
+// AUTOMATION ENDPOINT
+// ====================================================
+
+app.post(
+  "/automation/run",
+  async (req, res) => {
+    try {
+      const secret =
+        req.headers[
+          "x-automation-secret"
+        ];
+
+      if (
+        !process.env
+          .AUTOMATION_SECRET
+      ) {
+        return res
+          .status(503)
+          .json({
+            success:
+              false,
+
+            error:
+              "Automation is not configured."
+          });
+      }
+
+      if (
+        secret !==
+        process.env
+          .AUTOMATION_SECRET
+      ) {
+        return res
+          .status(401)
+          .json({
+            success:
+              false,
+
+            error:
+              "Unauthorized."
+          });
+      }
+
+      const result =
+        await createShort({
+          topic:
+            req.body
+              ?.topic,
+
+          tone:
+            req.body
+              ?.tone ||
+            "powerful, cinematic and direct",
+
+          durationSeconds:
+            req.body
+              ?.durationSeconds ||
+            30,
+
+          privacyStatus:
+            req.body
+              ?.privacyStatus ||
+            process.env
+              .AUTOMATION_PRIVACY_STATUS ||
+            "private"
+        });
+
+      return res.json(
+        result
+      );
+
+    } catch (error) {
+      console.error(
+        "Automation failed:",
+        error.message
+      );
+
+      const status =
+        error.message
+          .includes(
+            "already being generated"
+          )
+          ? 409
+          : 500;
+
+      return res
+        .status(status)
+        .json({
+          success:
+            false,
+
+          error:
+            error.message
+        });
+    }
+  }
+);
+
+// ====================================================
+// GOOGLE OAUTH
+// ====================================================
 
 app.get(
   "/auth/google",
   (req, res) => {
     const authUrl =
-      oauth2Client.generateAuthUrl({
-        access_type:
-          "offline",
+      oauth2Client
+        .generateAuthUrl({
+          access_type:
+            "offline",
 
-        prompt:
-          "consent",
+          prompt:
+            "consent",
 
-        include_granted_scopes:
-          true,
+          include_granted_scopes:
+            true,
 
-        scope: [
-          "https://www.googleapis.com/auth/youtube.upload"
-        ]
-      });
+          scope: [
+            "https://www.googleapis.com/auth/youtube.upload",
+            "https://www.googleapis.com/auth/youtube.readonly"
+          ]
+        });
 
     res.redirect(
       authUrl
@@ -1925,8 +3234,9 @@ app.get(
   "/auth/google/callback",
   async (req, res) => {
     try {
-      const { code } =
-        req.query;
+      const {
+        code
+      } = req.query;
 
       if (!code) {
         return res
@@ -1936,10 +3246,13 @@ app.get(
           );
       }
 
-      const { tokens } =
-        await oauth2Client.getToken(
-          code
-        );
+      const {
+        tokens
+      } =
+        await oauth2Client
+          .getToken(
+            code
+          );
 
       saveTokens(
         tokens
@@ -1950,18 +3263,48 @@ app.get(
       );
 
       return res.send(`
-        <h1>
-          ✅ YouTube Connected
-        </h1>
+<!doctype html>
+<html>
+<head>
+<meta
+name="viewport"
+content="width=device-width,initial-scale=1"
+/>
+<title>YouTube Connected</title>
+</head>
 
-        <p>
-          Your YouTube authorization is saved.
-        </p>
+<body
+style="
+font-family:Arial;
+padding:40px;
+background:#090909;
+color:white;
+"
+>
 
-        <a href="/">
-          Return to automation
-        </a>
+<h1>
+✅ YouTube Connected
+</h1>
+
+<p>
+Your authorization has been saved successfully.
+</p>
+
+<p>
+The automatic Shorts engine can now upload videos.
+</p>
+
+<a
+href="/"
+style="color:white;"
+>
+Return to automation
+</a>
+
+</body>
+</html>
       `);
+
     } catch (error) {
       console.error(
         "OAuth callback failed:",
@@ -1977,16 +3320,65 @@ app.get(
   }
 );
 
-// ----------------------------------------------------
-// Start
-// ----------------------------------------------------
+// ====================================================
+// 404
+// ====================================================
+
+app.use(
+  (req, res) => {
+    res
+      .status(404)
+      .json({
+        success:
+          false,
+
+        error:
+          "Route not found."
+      });
+  }
+);
+
+// ====================================================
+// START
+// ====================================================
 
 app.listen(
   PORT,
   "0.0.0.0",
   () => {
     console.log(
-      `Server running on port ${PORT}`
+      `Automatic Shorts Engine running on port ${PORT}`
+    );
+
+    console.log(
+      "YouTube:",
+      storedTokens
+        ? "connected"
+        : "not connected"
+    );
+
+    console.log(
+      "OpenAI:",
+      process.env
+        .OPENAI_API_KEY
+        ? "configured"
+        : "missing"
+    );
+
+    console.log(
+      "Pexels:",
+      process.env
+        .PEXELS_API_KEY
+        ? "configured"
+        : "missing"
+    );
+
+    console.log(
+      "Automation:",
+      process.env
+        .AUTOMATION_SECRET
+        ? "configured"
+        : "missing"
     );
   }
 );
