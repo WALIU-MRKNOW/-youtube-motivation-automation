@@ -1,14 +1,28 @@
 import express from "express";
 import { google } from "googleapis";
+import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Persist tokens to the Railway persistent volume
-const TOKEN_PATH = '/app/data/youtube-token.json';
-const LEGACY_TOKEN_FILE = path.join('/app/data', 'tokens.json');
+app.use(express.json());
+
+// ------------------------------------
+// OpenAI
+// ------------------------------------
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+
+// ------------------------------------
+// YouTube OAuth persistent storage
+// ------------------------------------
+
+const TOKEN_PATH = "/app/data/youtube-token.json";
+const LEGACY_TOKEN_FILE = path.join("/app/data", "tokens.json");
 
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
@@ -18,53 +32,48 @@ const oauth2Client = new google.auth.OAuth2(
 
 let storedTokens = null;
 
-/* -----------------------------
-   Persistent token storage
------------------------------ */
-
 function ensureTokenDirectory() {
   const dir = path.dirname(TOKEN_PATH);
+
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
 }
 
 function writeCredentialsFile() {
-  // Write the COMPLETE credentials object from the oauth2 client
-  // Do NOT log or expose token values.
   ensureTokenDirectory();
+
   try {
     fs.writeFileSync(
       TOKEN_PATH,
       JSON.stringify(oauth2Client.credentials, null, 2),
       {
-        encoding: 'utf8',
+        encoding: "utf8",
         mode: 0o600
       }
     );
   } catch (err) {
-    console.error('Unable to persist YouTube OAuth credentials:', err.message);
+    console.error(
+      "Unable to persist YouTube OAuth credentials:",
+      err.message
+    );
   }
 }
 
 function saveTokens(tokens) {
   ensureTokenDirectory();
 
-  // Load existing credentials if we don't have them in memory
   if (!storedTokens) {
     try {
       if (fs.existsSync(TOKEN_PATH)) {
-        const raw = fs.readFileSync(TOKEN_PATH, 'utf8');
+        const raw = fs.readFileSync(TOKEN_PATH, "utf8");
         storedTokens = JSON.parse(raw);
       }
-    } catch (err) {
-      // ignore parse errors; we'll overwrite below
-      storedTokens = storedTokens || {};
+    } catch {
+      storedTokens = {};
     }
   }
 
-  // Merge incoming tokens with existing credentials.
-  // Preserve refresh_token when Google only returns a new access token.
   const merged = {
     ...(storedTokens || {}),
     ...(tokens || {})
@@ -72,7 +81,6 @@ function saveTokens(tokens) {
 
   storedTokens = merged;
 
-  // Apply to oauth client and persist the COMPLETE credentials object
   oauth2Client.setCredentials(merged);
   writeCredentialsFile();
 }
@@ -81,150 +89,392 @@ function loadTokens() {
   try {
     ensureTokenDirectory();
 
-    // Prefer the canonical TOKEN_PATH. If not present, check legacy file and migrate.
-    if (!fs.existsSync(TOKEN_PATH) && fs.existsSync(LEGACY_TOKEN_FILE)) {
+    // Migrate old token file if necessary.
+    if (
+      !fs.existsSync(TOKEN_PATH) &&
+      fs.existsSync(LEGACY_TOKEN_FILE)
+    ) {
       try {
-        const rawLegacy = fs.readFileSync(LEGACY_TOKEN_FILE, 'utf8');
+        const rawLegacy = fs.readFileSync(
+          LEGACY_TOKEN_FILE,
+          "utf8"
+        );
+
         const legacy = JSON.parse(rawLegacy);
-        // set credentials and write to the canonical path
+
         oauth2Client.setCredentials(legacy);
         storedTokens = legacy;
+
         writeCredentialsFile();
-        console.log('Loaded saved YouTube OAuth credentials');
+
+        console.log(
+          "Loaded saved YouTube OAuth credentials"
+        );
+
         return;
-      } catch (err) {
-        // If migration fails, continue and try canonical path below
+      } catch {
+        // Continue to normal token loading.
       }
     }
 
     if (!fs.existsSync(TOKEN_PATH)) {
-      console.log('No saved YouTube OAuth credentials found.');
+      console.log(
+        "No saved YouTube OAuth credentials found."
+      );
+
       return;
     }
 
-    const raw = fs.readFileSync(TOKEN_PATH, 'utf8');
+    const raw = fs.readFileSync(
+      TOKEN_PATH,
+      "utf8"
+    );
+
     const tokens = JSON.parse(raw);
 
     storedTokens = tokens;
     oauth2Client.setCredentials(tokens);
 
-    console.log('Loaded saved YouTube OAuth credentials');
+    console.log(
+      "Loaded saved YouTube OAuth credentials"
+    );
   } catch (error) {
-    // Do not log secrets
-    console.error('Unable to load saved YouTube credentials:', error.message);
+    console.error(
+      "Unable to load saved YouTube credentials:",
+      error.message
+    );
   }
 }
 
-// Listen for Google's token events and persist changes.
-// Do not expose token values in logs.
-oauth2Client.on('tokens', (tokens) => {
+oauth2Client.on("tokens", (tokens) => {
   try {
-    // tokens may include only access_token/expiry_date
     saveTokens(tokens);
-    console.log('YouTube OAuth credentials refreshed.');
+
+    console.log(
+      "YouTube OAuth credentials refreshed."
+    );
   } catch (error) {
-    console.error('Unable to persist refreshed OAuth credentials:', error.message);
+    console.error(
+      "Unable to persist refreshed OAuth credentials:",
+      error.message
+    );
   }
 });
 
 loadTokens();
 
-/* -----------------------------
-   Routes
------------------------------ */
+// ------------------------------------
+// Main routes
+// ------------------------------------
 
-app.get('/', (req, res) => {
+app.get("/", (req, res) => {
   res.send(`
     <h1>YouTube Motivation Automation</h1>
+
     <p>Server is running 🚀</p>
 
     <p>
-      YouTube status:
-      <strong>${storedTokens ? 'Connected ✅' : 'Not connected'}</strong>
+      YouTube:
+      <strong>
+        ${storedTokens ? "Connected ✅" : "Not connected"}
+      </strong>
     </p>
 
-    <a href="/auth/google">Connect YouTube</a>
+    <p>
+      OpenAI:
+      <strong>
+        ${process.env.OPENAI_API_KEY ? "Configured ✅" : "Missing"}
+      </strong>
+    </p>
+
+    <a href="/auth/google">
+      Connect YouTube
+    </a>
+
     <br><br>
-    <a href="/status">Check Connection</a>
+
+    <a href="/status">
+      Check System Status
+    </a>
   `);
 });
 
-app.get('/health', (req, res) => {
-  // persistentStorage is true if the storage directory exists and is writable
-  const persistentStorage = fs.existsSync(path.dirname(TOKEN_PATH));
+app.get("/health", (req, res) => {
+  const persistentStorage =
+    fs.existsSync(path.dirname(TOKEN_PATH));
+
   res.json({
     connected: Boolean(storedTokens),
-    persistentStorage: Boolean(persistentStorage),
-    server: 'running'
+    openaiConfigured: Boolean(
+      process.env.OPENAI_API_KEY
+    ),
+    persistentStorage: Boolean(
+      persistentStorage
+    ),
+    server: "running"
   });
 });
 
-app.get('/status', (req, res) => {
-  const persistentStorage = fs.existsSync(path.dirname(TOKEN_PATH));
+app.get("/status", (req, res) => {
+  const persistentStorage =
+    fs.existsSync(path.dirname(TOKEN_PATH));
+
   res.json({
     connected: Boolean(storedTokens),
-    persistentStorage: Boolean(persistentStorage),
-    server: 'running'
+    openaiConfigured: Boolean(
+      process.env.OPENAI_API_KEY
+    ),
+    persistentStorage: Boolean(
+      persistentStorage
+    ),
+    server: "running"
   });
 });
 
-/* -----------------------------
-   Google OAuth
------------------------------ */
+// ------------------------------------
+// AI motivational content generator
+// ------------------------------------
 
-app.get('/auth/google', (req, res) => {
-  const authUrl = oauth2Client.generateAuthUrl({
-    access_type: 'offline',
-    prompt: 'consent',
-    include_granted_scopes: true,
-    scope: [
-      'https://www.googleapis.com/auth/youtube.upload'
-    ]
-  });
+app.post("/generate-script", async (req, res) => {
+  try {
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        error: "OpenAI API is not configured."
+      });
+    }
+
+    const {
+      topic = "discipline and consistency",
+      tone = "powerful, direct, cinematic",
+      durationSeconds = 30
+    } = req.body || {};
+
+    const duration = Math.min(
+      Math.max(Number(durationSeconds) || 30, 15),
+      60
+    );
+
+    const response = await openai.responses.create({
+      model: "gpt-5-mini",
+
+      instructions: `
+You create highly engaging original motivational
+YouTube Shorts.
+
+Your writing should feel human, emotionally powerful,
+concise, modern and suitable for spoken narration.
+
+Never invent quotations from famous people.
+Never reproduce copyrighted song lyrics.
+Do not imitate a living person's voice or pretend the
+script was spoken by a celebrity.
+
+Make the first sentence immediately attention-grabbing.
+Avoid generic motivational filler.
+
+Create content optimized for a vertical short-form video.
+      `,
+
+      input: `
+Create one complete motivational YouTube Short package.
+
+TOPIC:
+${topic}
+
+TONE:
+${tone}
+
+TARGET LENGTH:
+Approximately ${duration} seconds when narrated.
+
+The script should:
+- have an immediate hook
+- use short spoken sentences
+- build emotional momentum
+- contain one clear core message
+- end with a memorable closing line or call to action
+
+Also create:
+- a YouTube Shorts title
+- an SEO-focused description
+- relevant hashtags
+- visual scene ideas for the future video generator
+      `,
+
+      text: {
+        format: {
+          type: "json_schema",
+          name: "motivational_short",
+          strict: true,
+
+          schema: {
+            type: "object",
+
+            properties: {
+              hook: {
+                type: "string"
+              },
+
+              script: {
+                type: "string"
+              },
+
+              title: {
+                type: "string"
+              },
+
+              description: {
+                type: "string"
+              },
+
+              hashtags: {
+                type: "array",
+                items: {
+                  type: "string"
+                },
+                minItems: 3,
+                maxItems: 8
+              },
+
+              visualDirection: {
+                type: "array",
+                items: {
+                  type: "string"
+                },
+                minItems: 3,
+                maxItems: 6
+              }
+            },
+
+            required: [
+              "hook",
+              "script",
+              "title",
+              "description",
+              "hashtags",
+              "visualDirection"
+            ],
+
+            additionalProperties: false
+          }
+        }
+      }
+    });
+
+    const content = JSON.parse(
+      response.output_text
+    );
+
+    res.json({
+      success: true,
+      topic,
+      tone,
+      durationSeconds: duration,
+      content
+    });
+
+  } catch (error) {
+    console.error(
+      "Script generation failed:",
+      error.message
+    );
+
+    res.status(500).json({
+      success: false,
+      error:
+        "Unable to generate motivational content."
+    });
+  }
+});
+
+// ------------------------------------
+// Google OAuth
+// ------------------------------------
+
+app.get("/auth/google", (req, res) => {
+  const authUrl =
+    oauth2Client.generateAuthUrl({
+      access_type: "offline",
+      prompt: "consent",
+      include_granted_scopes: true,
+
+      scope: [
+        "https://www.googleapis.com/auth/youtube.upload"
+      ]
+    });
 
   res.redirect(authUrl);
 });
 
-app.get('/auth/google/callback', async (req, res) => {
-  try {
-    const { code } = req.query;
+app.get(
+  "/auth/google/callback",
+  async (req, res) => {
+    try {
+      const { code } = req.query;
 
-    if (!code) {
-      return res
-        .status(400)
-        .send('Authorization code missing.');
+      if (!code) {
+        return res
+          .status(400)
+          .send(
+            "Authorization code missing."
+          );
+      }
+
+      const { tokens } =
+        await oauth2Client.getToken(code);
+
+      saveTokens(tokens);
+
+      writeCredentialsFile();
+
+      console.log(
+        "YouTube OAuth connection successfully saved."
+      );
+
+      res.send(`
+        <h1>✅ YouTube Connected</h1>
+
+        <p>
+          Your YouTube authorization has been saved.
+        </p>
+
+        <p>
+          The automation can now use your YouTube account.
+        </p>
+
+        <br>
+
+        <a href="/status">
+          Check system status
+        </a>
+      `);
+
+    } catch (error) {
+      console.error(
+        "OAuth callback failed:",
+        error.message
+      );
+
+      res
+        .status(500)
+        .send(
+          "YouTube authorization failed."
+        );
     }
-
-    const { tokens } = await oauth2Client.getToken(code);
-
-    // Save the returned tokens (merge with any existing refresh_token)
-    saveTokens(tokens);
-
-    // Ensure the COMPLETE credentials object is persisted
-    writeCredentialsFile();
-
-    console.log('YouTube OAuth connection successfully saved.');
-
-    res.send(`
-      <h1>✅ YouTube Connected</h1>
-      <p>Your YouTube authorization has been saved persistently.</p>
-      <p>You should not need to reconnect after every Railway restart.</p>
-      <br>
-      <a href="/status">Check connection status</a>
-    `);
-  } catch (error) {
-    console.error('OAuth callback failed:', error.message);
-
-    res
-      .status(500)
-      .send('YouTube authorization failed.');
   }
-});
+);
 
-/* -----------------------------
-   Start server
------------------------------ */
+// ------------------------------------
+// Start Railway server
+// ------------------------------------
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `Server running on port ${PORT}`
+    );
+  }
+);
