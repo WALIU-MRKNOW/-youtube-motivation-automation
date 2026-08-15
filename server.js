@@ -1,11 +1,13 @@
 import express from "express";
 import { google } from "googleapis";
 import fs from "fs";
+import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-let storedTokens = null;
+const TOKEN_DIR = process.env.TOKEN_DIR || "/app/data";
+const TOKEN_FILE = path.join(TOKEN_DIR, "tokens.json");
 
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
@@ -13,10 +15,94 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_REDIRECT_URI
 );
 
+let storedTokens = null;
+
+/* -----------------------------
+   Persistent token storage
+----------------------------- */
+
+function ensureTokenDirectory() {
+  if (!fs.existsSync(TOKEN_DIR)) {
+    fs.mkdirSync(TOKEN_DIR, { recursive: true });
+  }
+}
+
+function saveTokens(tokens) {
+  ensureTokenDirectory();
+
+  // Keep the existing refresh token when Google only returns
+  // a new access token.
+  storedTokens = {
+    ...(storedTokens || {}),
+    ...tokens
+  };
+
+  fs.writeFileSync(
+    TOKEN_FILE,
+    JSON.stringify(storedTokens),
+    {
+      encoding: "utf8",
+      mode: 0o600
+    }
+  );
+
+  oauth2Client.setCredentials(storedTokens);
+}
+
+function loadTokens() {
+  try {
+    ensureTokenDirectory();
+
+    if (!fs.existsSync(TOKEN_FILE)) {
+      console.log("No saved YouTube OAuth credentials found.");
+      return;
+    }
+
+    const raw = fs.readFileSync(TOKEN_FILE, "utf8");
+    const tokens = JSON.parse(raw);
+
+    storedTokens = tokens;
+    oauth2Client.setCredentials(tokens);
+
+    console.log("Saved YouTube OAuth credentials loaded.");
+  } catch (error) {
+    console.error(
+      "Unable to load saved YouTube credentials:",
+      error.message
+    );
+  }
+}
+
+// Google can issue refreshed access tokens automatically.
+// Save them without logging the token values.
+oauth2Client.on("tokens", (tokens) => {
+  try {
+    saveTokens(tokens);
+    console.log("YouTube OAuth credentials refreshed.");
+  } catch (error) {
+    console.error(
+      "Unable to persist refreshed OAuth credentials:",
+      error.message
+    );
+  }
+});
+
+loadTokens();
+
+/* -----------------------------
+   Routes
+----------------------------- */
+
 app.get("/", (req, res) => {
   res.send(`
     <h1>YouTube Motivation Automation</h1>
     <p>Server is running 🚀</p>
+
+    <p>
+      YouTube status:
+      <strong>${storedTokens ? "Connected ✅" : "Not connected"}</strong>
+    </p>
+
     <a href="/auth/google">Connect YouTube</a>
     <br><br>
     <a href="/status">Check Connection</a>
@@ -24,15 +110,22 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
+  res.json({
+    status: "ok"
+  });
 });
 
 app.get("/status", (req, res) => {
   res.json({
     connected: Boolean(storedTokens),
+    persistentStorage: true,
     server: "running"
   });
 });
+
+/* -----------------------------
+   Google OAuth
+----------------------------- */
 
 app.get("/auth/google", (req, res) => {
   const authUrl = oauth2Client.generateAuthUrl({
@@ -52,87 +145,41 @@ app.get("/auth/google/callback", async (req, res) => {
     const { code } = req.query;
 
     if (!code) {
-      return res.status(400).send("Authorization code missing.");
+      return res
+        .status(400)
+        .send("Authorization code missing.");
     }
 
     const { tokens } = await oauth2Client.getToken(code);
 
-    storedTokens = tokens;
-    oauth2Client.setCredentials(tokens);
+    saveTokens(tokens);
 
-    console.log("YouTube OAuth connection successful.");
+    console.log(
+      "YouTube OAuth connection successfully saved."
+    );
 
     res.send(`
       <h1>✅ YouTube Connected</h1>
-      <p>Your channel is connected.</p>
-      <p>Next: upload a private test video.</p>
+      <p>Your YouTube authorization has been saved persistently.</p>
+      <p>You should not need to reconnect after every Railway restart.</p>
+      <br>
+      <a href="/status">Check connection status</a>
     `);
   } catch (error) {
-    console.error("OAuth callback failed:", error.message);
-    res.status(500).send("YouTube authorization failed.");
+    console.error(
+      "OAuth callback failed:",
+      error.message
+    );
+
+    res
+      .status(500)
+      .send("YouTube authorization failed.");
   }
 });
 
-app.get("/upload-test", async (req, res) => {
-  try {
-    if (!storedTokens) {
-      return res.status(401).send(`
-        <h1>YouTube is not connected</h1>
-        <a href="/auth/google">Connect YouTube first</a>
-      `);
-    }
-
-    const videoPath = "./test-video.mp4";
-
-    if (!fs.existsSync(videoPath)) {
-      return res.status(404).send(`
-        <h1>test-video.mp4 is missing</h1>
-        <p>Add a file named test-video.mp4 to the GitHub repository.</p>
-      `);
-    }
-
-    oauth2Client.setCredentials(storedTokens);
-
-    const youtube = google.youtube({
-      version: "v3",
-      auth: oauth2Client
-    });
-
-    const response = await youtube.videos.insert({
-      part: ["snippet", "status"],
-      requestBody: {
-        snippet: {
-          title: "Motivation Automation Test",
-          description:
-            "Private test upload from the YouTube Motivation Automation system.",
-          tags: ["motivation", "discipline", "success"],
-          categoryId: "22"
-        },
-        status: {
-          privacyStatus: "private",
-          selfDeclaredMadeForKids: false
-        }
-      },
-      media: {
-        body: fs.createReadStream(videoPath)
-      }
-    });
-
-    res.send(`
-      <h1>✅ Upload successful</h1>
-      <p>Video ID: ${response.data.id}</p>
-      <p>The video was uploaded privately.</p>
-    `);
-
-  } catch (error) {
-    console.error("Upload failed:", error.message);
-
-    res.status(500).send(`
-      <h1>Upload failed</h1>
-      <p>${error.message}</p>
-    `);
-  }
-});
+/* -----------------------------
+   Start server
+----------------------------- */
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
