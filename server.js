@@ -14,10 +14,6 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: "1mb" }));
 
-// ----------------------------------------------------
-// OpenAI
-// ----------------------------------------------------
-
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
@@ -85,7 +81,6 @@ function saveTokens(tokens = {}) {
   };
 
   storedTokens = merged;
-
   oauth2Client.setCredentials(merged);
 
   writeCredentialsFile();
@@ -100,17 +95,11 @@ function loadTokens() {
       fs.existsSync(LEGACY_TOKEN_FILE)
     ) {
       const legacyTokens = JSON.parse(
-        fs.readFileSync(
-          LEGACY_TOKEN_FILE,
-          "utf8"
-        )
+        fs.readFileSync(LEGACY_TOKEN_FILE, "utf8")
       );
 
       storedTokens = legacyTokens;
-
-      oauth2Client.setCredentials(
-        legacyTokens
-      );
+      oauth2Client.setCredentials(legacyTokens);
 
       writeCredentialsFile();
 
@@ -125,25 +114,18 @@ function loadTokens() {
       console.log(
         "No saved YouTube OAuth credentials found."
       );
-
       return;
     }
 
     storedTokens = JSON.parse(
-      fs.readFileSync(
-        TOKEN_PATH,
-        "utf8"
-      )
+      fs.readFileSync(TOKEN_PATH, "utf8")
     );
 
-    oauth2Client.setCredentials(
-      storedTokens
-    );
+    oauth2Client.setCredentials(storedTokens);
 
     console.log(
       "Loaded saved YouTube OAuth credentials"
     );
-
   } catch (error) {
     console.error(
       "Unable to load saved YouTube credentials:",
@@ -152,59 +134,54 @@ function loadTokens() {
   }
 }
 
-oauth2Client.on(
-  "tokens",
-  (tokens) => {
-    try {
-      saveTokens(tokens);
+oauth2Client.on("tokens", (tokens) => {
+  try {
+    saveTokens(tokens);
 
-      console.log(
-        "YouTube OAuth credentials refreshed."
-      );
-    } catch (error) {
-      console.error(
-        "Unable to persist refreshed OAuth credentials:",
-        error.message
-      );
-    }
+    console.log(
+      "YouTube OAuth credentials refreshed."
+    );
+  } catch (error) {
+    console.error(
+      "Unable to persist refreshed OAuth credentials:",
+      error.message
+    );
   }
-);
+});
 
 loadTokens();
 
 // ----------------------------------------------------
-// Helpers
+// Status helpers
 // ----------------------------------------------------
 
 function getSystemStatus() {
   return {
     connected: Boolean(storedTokens),
-
     openaiConfigured: Boolean(
       process.env.OPENAI_API_KEY
     ),
-
+    pexelsConfigured: Boolean(
+      process.env.PEXELS_API_KEY
+    ),
     persistentStorage:
-      fs.existsSync(
-        path.dirname(TOKEN_PATH)
-      ),
-
+      fs.existsSync(path.dirname(TOKEN_PATH)),
     server: "running"
   };
 }
 
 async function checkFfmpeg() {
   try {
-    await execFileAsync(
-      "ffmpeg",
-      ["-version"]
-    );
-
+    await execFileAsync("ffmpeg", ["-version"]);
     return true;
   } catch {
     return false;
   }
 }
+
+// ----------------------------------------------------
+// AI content generation
+// ----------------------------------------------------
 
 async function generateContent({
   topic,
@@ -216,15 +193,27 @@ async function generateContent({
       model: "gpt-5-mini",
 
       instructions: `
-You create highly engaging original motivational YouTube Shorts.
+You create high-retention original motivational YouTube Shorts.
 
 Write concise, emotional, modern narration.
 
 Never invent quotations from famous people.
-Never reproduce copyrighted song lyrics.
+Never reproduce copyrighted lyrics.
 Never pretend a celebrity said something they did not say.
 
-The first sentence must immediately grab attention.
+Also create exactly 4 short stock-video search phrases.
+They should describe cinematic real-world footage available on a stock video platform.
+
+Good search phrases:
+- man running alone sunrise
+- athlete training dark gym
+- city night walking
+- mountain sunrise silhouette
+
+Avoid abstract phrases like:
+- success
+- motivation
+- become stronger
       `,
 
       input: `
@@ -245,14 +234,13 @@ Create:
 - YouTube title
 - SEO description
 - hashtags
+- exactly 4 Pexels video search phrases that visually match the narration
       `,
 
       text: {
         format: {
           type: "json_schema",
-
           name: "motivational_short",
-
           strict: true,
 
           schema: {
@@ -277,13 +265,20 @@ Create:
 
               hashtags: {
                 type: "array",
-
                 items: {
                   type: "string"
                 },
-
                 minItems: 3,
                 maxItems: 8
+              },
+
+              sceneQueries: {
+                type: "array",
+                items: {
+                  type: "string"
+                },
+                minItems: 4,
+                maxItems: 4
               }
             },
 
@@ -292,7 +287,8 @@ Create:
               "script",
               "title",
               "description",
-              "hashtags"
+              "hashtags",
+              "sceneQueries"
             ],
 
             additionalProperties: false
@@ -306,6 +302,10 @@ Create:
   );
 }
 
+// ----------------------------------------------------
+// OpenAI voice
+// ----------------------------------------------------
+
 async function generateVoice(
   text,
   outputPath
@@ -313,7 +313,6 @@ async function generateVoice(
   const speech =
     await openai.audio.speech.create({
       model: "gpt-4o-mini-tts",
-
       voice: "onyx",
 
       input: text,
@@ -336,909 +335,59 @@ async function generateVoice(
   );
 }
 
-async function getAudioDuration(
-  audioPath
-) {
-  const { stdout } =
-    await execFileAsync(
-      "ffprobe",
-      [
-        "-v",
-        "error",
-
-        "-show_entries",
-        "format=duration",
-
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-
-        audioPath
-      ]
-    );
-
-  return Number(
-    stdout.trim()
-  );
-}
-
-function escapeAssText(text) {
-  return text
-    .replace(/\\/g, "\\\\")
-    .replace(/{/g, "\\{")
-    .replace(/}/g, "\\}")
-    .replace(/\n/g, " ");
-}
-
-function secondsToAssTime(
-  seconds
-) {
-  const hrs =
-    Math.floor(
-      seconds / 3600
-    );
-
-  const mins =
-    Math.floor(
-      (seconds % 3600) / 60
-    );
-
-  const secs =
-    seconds % 60;
-
-  return `${hrs}:${String(mins).padStart(
-    2,
-    "0"
-  )}:${secs
-    .toFixed(2)
-    .padStart(5, "0")}`;
-}
-
-function createAssCaptions(
-  script,
-  duration,
-  outputPath
-) {
-  const words =
-    script
-      .trim()
-      .split(/\s+/);
-
-  const wordsPerCaption = 5;
-  const chunks = [];
-
-  for (
-    let i = 0;
-    i < words.length;
-    i += wordsPerCaption
-  ) {
-    chunks.push(
-      words
-        .slice(
-          i,
-          i + wordsPerCaption
-        )
-        .join(" ")
-    );
-  }
-
-  const chunkDuration =
-    duration / chunks.length;
-
-  let events = "";
-
-  chunks.forEach(
-    (chunk, index) => {
-      const start =
-        index * chunkDuration;
-
-      const end =
-        Math.min(
-          duration,
-          (index + 1) *
-            chunkDuration
-        );
-
-      events +=
-        `Dialogue: 0,` +
-        `${secondsToAssTime(start)},` +
-        `${secondsToAssTime(end)},` +
-        `Default,,0,0,0,,` +
-        `${escapeAssText(chunk)}\n`;
-    }
-  );
-
-  const ass = `
-[Script Info]
-ScriptType: v4.00+
-PlayResX: 720
-PlayResY: 1280
-WrapStyle: 2
-
-[V4+ Styles]
-Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,DejaVu Sans,48,&H00FFFFFF,&H000000FF,&H00000000,&H66000000,-1,0,0,0,100,100,0,0,1,4,2,2,50,50,210,1
-
-[Events]
-Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
-${events}
-`;
-
-  fs.writeFileSync(
-    outputPath,
-    ass.trim()
-  );
-}
-
 // ----------------------------------------------------
-// Railway-safe FFmpeg renderer
+// Pexels video search
 // ----------------------------------------------------
 
-async function renderVideo({
-  audioPath,
-  subtitlePath,
-  videoPath
-}) {
-  await execFileAsync(
-    "ffmpeg",
-    [
-      "-y",
+function chooseBestPexelsFile(video) {
+  const files = (video.video_files || [])
+    .filter(file =>
+      file.file_type === "video/mp4"
+    )
+    .filter(file =>
+      file.width && file.height
+    )
+    .sort((a, b) => {
+      const aPortrait =
+        a.height > a.width ? 1 : 0;
 
-      "-f",
-      "lavfi",
+      const bPortrait =
+        b.height > b.width ? 1 : 0;
 
-      "-i",
-      "color=c=0x090909:s=720x1280:r=30",
+      if (aPortrait !== bPortrait) {
+        return bPortrait - aPortrait;
+      }
 
-      "-i",
-      audioPath,
+      const aArea =
+        a.width * a.height;
 
-      "-vf",
-      `subtitles=${subtitlePath}`,
+      const bArea =
+        b.width * b.height;
 
-      "-c:v",
-      "libx264",
+      return bArea - aArea;
+    });
 
-      "-preset",
-      "veryfast",
-
-      "-crf",
-      "26",
-
-      "-threads",
-      "2",
-
-      "-pix_fmt",
-      "yuv420p",
-
-      "-c:a",
-      "aac",
-
-      "-b:a",
-      "96k",
-
-      "-shortest",
-
-      "-movflags",
-      "+faststart",
-
-      videoPath
-    ],
-    {
-      maxBuffer:
-        10 * 1024 * 1024
-    }
-  );
+  return files[0] || null;
 }
 
-async function uploadToYouTube({
-  videoPath,
-  title,
-  description,
-  hashtags
-}) {
-  if (!storedTokens) {
+async function searchPexelsVideo(query) {
+  if (!process.env.PEXELS_API_KEY) {
     throw new Error(
-      "YouTube is not connected."
+      "Pexels API is not configured."
     );
   }
 
-  oauth2Client.setCredentials(
-    storedTokens
+  const url =
+    new URL(
+      "https://api.pexels.com/v1/videos/search"
+    );
+
+  url.searchParams.set(
+    "query",
+    query
   );
 
-  const youtube =
-    google.youtube({
-      version: "v3",
-      auth: oauth2Client
-    });
-
-  const finalDescription =
-    `${description}\n\n${hashtags.join(
-      " "
-    )}`;
-
-  const result =
-    await youtube.videos.insert({
-      part: [
-        "snippet",
-        "status"
-      ],
-
-      requestBody: {
-        snippet: {
-          title:
-            title.slice(
-              0,
-              100
-            ),
-
-          description:
-            finalDescription.slice(
-              0,
-              5000
-            ),
-
-          tags:
-            hashtags
-              .map(
-                tag =>
-                  tag.replace(
-                    "#",
-                    ""
-                  )
-              )
-              .slice(
-                0,
-                15
-              ),
-
-          categoryId: "22"
-        },
-
-        status: {
-          privacyStatus:
-            "private",
-
-          selfDeclaredMadeForKids:
-            false
-        }
-      },
-
-      media: {
-        body:
-          fs.createReadStream(
-            videoPath
-          )
-      }
-    });
-
-  return result.data.id;
-}
-
-// ----------------------------------------------------
-// Main page
-// ----------------------------------------------------
-
-app.get("/", (req, res) => {
-  res.send(`
-<!doctype html>
-
-<html>
-
-<head>
-
-<meta
-  name="viewport"
-  content="width=device-width,initial-scale=1"
-/>
-
-<title>
-Motivation Shorts Engine
-</title>
-
-<style>
-
-body {
-  font-family: Arial, sans-serif;
-  max-width: 700px;
-  margin: 40px auto;
-  padding: 20px;
-  background: #0b0b0b;
-  color: white;
-}
-
-input,
-button {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 14px;
-  margin-top: 12px;
-  font-size: 16px;
-}
-
-input {
-  background: #171717;
-  border: 1px solid #444;
-  color: white;
-  border-radius: 8px;
-}
-
-button {
-  background: white;
-  color: black;
-  font-weight: bold;
-  border: 0;
-  border-radius: 8px;
-}
-
-#result {
-  white-space: pre-wrap;
-  margin-top: 24px;
-  overflow-wrap: anywhere;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<h1>
-Motivation Shorts Engine 🚀
-</h1>
-
-<p>
-YouTube:
-<strong>
-${
-  storedTokens
-    ? "Connected ✅"
-    : "Not connected"
-}
-</strong>
-</p>
-
-<p>
-OpenAI:
-<strong>
-${
-  process.env.OPENAI_API_KEY
-    ? "Configured ✅"
-    : "Missing"
-}
-</strong>
-</p>
-
-<input
-  id="topic"
-  placeholder="Topic"
-  value="Nobody is coming to save you"
-/>
-
-<button
-  id="generateButton"
-  onclick="createShort()"
->
-Generate Private YouTube Short
-</button>
-
-<p id="result"></p>
-
-<script>
-
-async function createShort() {
-
-  const result =
-    document.getElementById(
-      "result"
-    );
-
-  const button =
-    document.getElementById(
-      "generateButton"
-    );
-
-  button.disabled = true;
-
-  result.textContent =
-    "Generating script, voice, captions, video and YouTube upload...";
-
-  try {
-
-    const response =
-      await fetch(
-        "/create-short",
-        {
-          method:
-            "POST",
-
-          headers: {
-            "Content-Type":
-              "application/json"
-          },
-
-          body:
-            JSON.stringify({
-              topic:
-                document
-                  .getElementById(
-                    "topic"
-                  )
-                  .value
-            })
-        }
-      );
-
-    const data =
-      await response.json();
-
-    result.textContent =
-      JSON.stringify(
-        data,
-        null,
-        2
-      );
-
-  } catch (error) {
-
-    result.textContent =
-      error.message;
-
-  } finally {
-
-    button.disabled =
-      false;
-  }
-}
-
-</script>
-
-</body>
-
-</html>
-  `);
-});
-
-// ----------------------------------------------------
-// Status
-// ----------------------------------------------------
-
-app.get(
-  "/status",
-  async (req, res) => {
-
-    res.json({
-      ...getSystemStatus(),
-
-      ffmpeg:
-        await checkFfmpeg()
-    });
-  }
-);
-
-app.get(
-  "/health",
-  (req, res) => {
-
-    res.json(
-      getSystemStatus()
-    );
-  }
-);
-
-app.get(
-  "/last-upload",
-  (req, res) => {
-
-    res.json({
-      lastUpload
-    });
-  }
-);
-
-// ----------------------------------------------------
-// FULL SHORT PIPELINE
-// ----------------------------------------------------
-
-app.post(
-  "/create-short",
-  async (req, res) => {
-
-    const jobId =
-      `${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
-
-    const workDir =
-      path.join(
-        os.tmpdir(),
-        `short-${jobId}`
-      );
-
-    try {
-
-      if (
-        !process.env.OPENAI_API_KEY
-      ) {
-        return res
-          .status(500)
-          .json({
-            success: false,
-
-            error:
-              "OpenAI API is not configured."
-          });
-      }
-
-      if (!storedTokens) {
-        return res
-          .status(401)
-          .json({
-            success: false,
-
-            error:
-              "YouTube is not connected."
-          });
-      }
-
-      if (
-        !(await checkFfmpeg())
-      ) {
-        return res
-          .status(500)
-          .json({
-            success: false,
-
-            error:
-              "FFmpeg is not installed."
-          });
-      }
-
-      const {
-        topic =
-          "discipline and consistency",
-
-        tone =
-          "powerful, cinematic and direct",
-
-        durationSeconds =
-          30
-      } = req.body || {};
-
-      const duration =
-        Math.min(
-          Math.max(
-            Number(
-              durationSeconds
-            ) || 30,
-            15
-          ),
-          60
-        );
-
-      await fs.promises.mkdir(
-        workDir,
-        {
-          recursive: true
-        }
-      );
-
-      const audioPath =
-        path.join(
-          workDir,
-          "voice.mp3"
-        );
-
-      const subtitlePath =
-        path.join(
-          workDir,
-          "captions.ass"
-        );
-
-      const videoPath =
-        path.join(
-          workDir,
-          "short.mp4"
-        );
-
-      console.log(
-        "Generating content..."
-      );
-
-      const content =
-        await generateContent({
-          topic,
-          tone,
-          durationSeconds:
-            duration
-        });
-
-      console.log(
-        "Generating voice..."
-      );
-
-      await generateVoice(
-        content.script,
-        audioPath
-      );
-
-      console.log(
-        "Reading audio duration..."
-      );
-
-      const actualDuration =
-        await getAudioDuration(
-          audioPath
-        );
-
-      console.log(
-        "Generating captions..."
-      );
-
-      createAssCaptions(
-        content.script,
-        actualDuration,
-        subtitlePath
-      );
-
-      console.log(
-        "Rendering video..."
-      );
-
-      await renderVideo({
-        audioPath,
-        subtitlePath,
-        videoPath
-      });
-
-      console.log(
-        "Uploading to YouTube..."
-      );
-
-      const youtubeVideoId =
-        await uploadToYouTube({
-          videoPath,
-
-          title:
-            content.title,
-
-          description:
-            content.description,
-
-          hashtags:
-            content.hashtags
-        });
-
-      lastUpload = {
-        videoId:
-          youtubeVideoId,
-
-        title:
-          content.title,
-
-        createdAt:
-          new Date()
-            .toISOString(),
-
-        privacyStatus:
-          "private"
-      };
-
-      console.log(
-        "Private YouTube Short uploaded successfully."
-      );
-
-      return res.json({
-        success: true,
-
-        youtubeVideoId,
-
-        privacyStatus:
-          "private",
-
-        content
-      });
-
-    } catch (error) {
-
-      console.error(
-        "Create short failed:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-
-          error:
-            error.message ||
-            "Unable to create Short."
-        });
-
-    } finally {
-
-      fs.promises
-        .rm(
-          workDir,
-          {
-            recursive: true,
-            force: true
-          }
-        )
-        .catch(
-          () => {}
-        );
-    }
-  }
-);
-
-// ----------------------------------------------------
-// Voice test
-// ----------------------------------------------------
-
-app.get(
-  "/test-voice",
-  async (req, res) => {
-
-    try {
-
-      const speech =
-        await openai.audio.speech.create({
-          model:
-            "gpt-4o-mini-tts",
-
-          voice:
-            "onyx",
-
-          input:
-            "Discipline begins when motivation disappears.",
-
-          instructions:
-            "Speak with a confident cinematic motivational tone.",
-
-          response_format:
-            "mp3"
-        });
-
-      const audioBuffer =
-        Buffer.from(
-          await speech.arrayBuffer()
-        );
-
-      res.setHeader(
-        "Content-Type",
-        "audio/mpeg"
-      );
-
-      return res.send(
-        audioBuffer
-      );
-
-    } catch (error) {
-
-      console.error(
-        "Voice test failed:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-
-          error:
-            "Unable to generate test voice."
-        });
-    }
-  }
-);
-
-// ----------------------------------------------------
-// Google OAuth
-// ----------------------------------------------------
-
-app.get(
-  "/auth/google",
-  (req, res) => {
-
-    const authUrl =
-      oauth2Client.generateAuthUrl({
-        access_type:
-          "offline",
-
-        prompt:
-          "consent",
-
-        include_granted_scopes:
-          true,
-
-        scope: [
-          "https://www.googleapis.com/auth/youtube.upload"
-        ]
-      });
-
-    res.redirect(
-      authUrl
-    );
-  }
-);
-
-app.get(
-  "/auth/google/callback",
-  async (req, res) => {
-
-    try {
-
-      const {
-        code
-      } = req.query;
-
-      if (!code) {
-
-        return res
-          .status(400)
-          .send(
-            "Authorization code missing."
-          );
-      }
-
-      const {
-        tokens
-      } =
-        await oauth2Client.getToken(
-          code
-        );
-
-      saveTokens(
-        tokens
-      );
-
-      console.log(
-        "YouTube OAuth connection successfully saved."
-      );
-
-      return res.send(`
-        <h1>
-        ✅ YouTube Connected
-        </h1>
-
-        <p>
-        Your YouTube authorization is saved.
-        </p>
-
-        <a href="/">
-        Return to automation
-        </a>
-      `);
-
-    } catch (error) {
-
-      console.error(
-        "OAuth callback failed:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .send(
-          "YouTube authorization failed."
-        );
-    }
-  }
-);
-
-// ----------------------------------------------------
-// Start server
-// ----------------------------------------------------
-
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-
-    console.log(
-      `Server running on port ${PORT}`
-    );
-  }
-);
+  url.searchParams.set(
+    "orientation",
+    "portrait"
+ 
