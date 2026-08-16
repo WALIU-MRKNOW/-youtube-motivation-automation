@@ -29,9 +29,65 @@ const HISTORY_PATH =
 
 const MAX_HISTORY = 100;
 
+// ====================================================
+// SMART MUSIC LIBRARY
+// ====================================================
+
+const MUSIC_LIBRARY = {
+  motivational: {
+    name: "Driving Ambition",
+    fileId: "1qGQA8n25_EcCMGL69r8BbpSCTJtJY0Ef"
+  },
+
+  dark: {
+    name: "Silent Descent",
+    fileId: "1qA6lDIB1Yndo7K4GNrQypzQACSn-dEJf"
+  },
+
+  reflective: {
+    name: "Serene View",
+    fileId: "1qrPAveUC0TGyb6Os0XYopi3MdNp4vKUC"
+  },
+
+  emotional: {
+    name: "Beautiful Dream",
+    fileId: "1oFJHsPvapqSPwkJOTkJ_ayJHYFEYih1T"
+  },
+
+  uplifting: {
+    name: "Very Happy",
+    fileId: "1BH5bKg3c-65yhMNkWNxVyTlRrS29PTPu"
+  }
+};
+
+function getMusicTrack(mood) {
+  return (
+    MUSIC_LIBRARY[mood] ||
+    MUSIC_LIBRARY.motivational
+  );
+}
+
+function createGoogleDriveDownloadUrl(
+  fileId
+) {
+  return (
+    "https://drive.usercontent.google.com/download" +
+    `?id=${encodeURIComponent(fileId)}` +
+    "&export=download&confirm=t"
+  );
+}
+
+// ====================================================
+// OPENAI
+// ====================================================
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
+
+// ====================================================
+// YOUTUBE OAUTH
+// ====================================================
 
 const oauth2Client =
   new google.auth.OAuth2(
@@ -139,9 +195,7 @@ function loadTokens() {
     ensureDataDirectory();
 
     if (
-      !fs.existsSync(
-        TOKEN_PATH
-      ) &&
+      !fs.existsSync(TOKEN_PATH) &&
       fs.existsSync(
         LEGACY_TOKEN_FILE
       )
@@ -365,10 +419,14 @@ function getSystemStatus() {
       ),
 
     musicConfigured:
-      Boolean(
-        process.env
-          .BACKGROUND_MUSIC_URL
-      ),
+      Object.keys(
+        MUSIC_LIBRARY
+      ).length > 0,
+
+    musicTracks:
+      Object.keys(
+        MUSIC_LIBRARY
+      ).length,
 
     automationConfigured:
       Boolean(
@@ -411,6 +469,7 @@ async function retry(
   ) {
     try {
       return await fn();
+
     } catch (error) {
       lastError = error;
 
@@ -481,7 +540,7 @@ function recentlyUsedTopic(
 }
 
 // ====================================================
-// AI CONTENT
+// AI TOPIC GENERATOR
 // ====================================================
 
 async function generateTopic() {
@@ -551,6 +610,10 @@ async function generateUniqueTopic() {
   );
 }
 
+// ====================================================
+// AI SHORT CONTENT + MUSIC MOOD
+// ====================================================
+
 async function generateContent({
   topic,
   tone,
@@ -602,6 +665,38 @@ motivation
 become powerful
 never give up
 winning mindset
+
+Also classify the overall MUSIC MOOD.
+
+Choose EXACTLY one:
+
+motivational
+dark
+reflective
+emotional
+uplifting
+
+Use:
+
+motivational:
+discipline, ambition, grind, confidence,
+hard work, goals, consistency
+
+dark:
+sacrifice, loneliness, harsh truths,
+pain, struggle, rejection, desperation
+
+reflective:
+life lessons, thinking, patience,
+perspective, quiet growth, self-awareness
+
+emotional:
+failure, heartbreak, recovery,
+healing, comeback, personal struggle
+
+uplifting:
+hope, achievement, breakthrough,
+new beginnings, positive transformation
       `,
 
       input: `
@@ -623,6 +718,7 @@ Return:
 - SEO-friendly description
 - hashtags
 - exactly four cinematic stock-video queries
+- musicMood
       `,
 
       text: {
@@ -691,6 +787,19 @@ Return:
 
                 maxItems:
                   4
+              },
+
+              musicMood: {
+                type:
+                  "string",
+
+                enum: [
+                  "motivational",
+                  "dark",
+                  "reflective",
+                  "emotional",
+                  "uplifting"
+                ]
               }
             },
 
@@ -700,7 +809,8 @@ Return:
               "title",
               "description",
               "hashtags",
-              "sceneQueries"
+              "sceneQueries",
+              "musicMood"
             ],
 
             additionalProperties:
@@ -832,7 +942,7 @@ async function searchPexelsVideo(
 
   const url =
     new URL(
-      "https://api.pexels.com/videos/search"
+      "https://api.pexels.com/v1/videos/search"
     );
 
   url.searchParams.set(
@@ -952,11 +1062,33 @@ async function downloadFile(
   outputPath
 ) {
   const response =
-    await fetch(url);
+    await fetch(
+      url,
+      {
+        redirect:
+          "follow"
+      }
+    );
 
   if (!response.ok) {
     throw new Error(
       `Download failed (${response.status}).`
+    );
+  }
+
+  const contentType =
+    response.headers
+      .get(
+        "content-type"
+      ) || "";
+
+  if (
+    contentType.includes(
+      "text/html"
+    )
+  ) {
+    throw new Error(
+      "Download returned an HTML page instead of a media file."
     );
   }
 
@@ -965,6 +1097,15 @@ async function downloadFile(
       await response
         .arrayBuffer()
     );
+
+  if (
+    buffer.length <
+    10000
+  ) {
+    throw new Error(
+      "Downloaded media file is unexpectedly small."
+    );
+  }
 
   await fs.promises
     .writeFile(
@@ -1061,13 +1202,91 @@ async function fetchSceneVideos(
 }
 
 // ====================================================
+// SMART BACKGROUND MUSIC
+// ====================================================
+
+async function prepareBackgroundMusic(
+  workDir,
+  musicMood
+) {
+  const track =
+    getMusicTrack(
+      musicMood
+    );
+
+  if (!track) {
+    return null;
+  }
+
+  const musicPath =
+    path.join(
+      workDir,
+      `music-${musicMood}.mp3`
+    );
+
+  const downloadUrl =
+    createGoogleDriveDownloadUrl(
+      track.fileId
+    );
+
+  try {
+    console.log(
+      `Music mood: ${musicMood}`
+    );
+
+    console.log(
+      `Selected music: ${track.name}`
+    );
+
+    await retry(
+      () =>
+        downloadFile(
+          downloadUrl,
+          musicPath
+        ),
+      {
+        attempts:
+          3,
+
+        delayMs:
+          1000,
+
+        label:
+          `Music download: ${track.name}`
+      }
+    );
+
+    return {
+      path:
+        musicPath,
+
+      mood:
+        musicMood,
+
+      name:
+        track.name
+    };
+
+  } catch (error) {
+    console.error(
+      "Background music unavailable:",
+      error.message
+    );
+
+    return null;
+  }
+}
+
+// ====================================================
 // AUDIO / VIDEO HELPERS
 // ====================================================
 
 async function getMediaDuration(
   mediaPath
 ) {
-  const { stdout } =
+  const {
+    stdout
+  } =
     await execFileAsync(
       "ffprobe",
       [
@@ -1202,7 +1421,10 @@ function createAssCaptions(
   let events = "";
 
   chunks.forEach(
-    (chunk, index) => {
+    (
+      chunk,
+      index
+    ) => {
       const start =
         index *
         chunkDuration;
@@ -1367,58 +1589,7 @@ async function stitchSceneClips(
 }
 
 // ====================================================
-// OPTIONAL BACKGROUND MUSIC
-// ====================================================
-
-async function prepareBackgroundMusic(
-  workDir
-) {
-  const url =
-    process.env
-      .BACKGROUND_MUSIC_URL;
-
-  if (!url) {
-    return null;
-  }
-
-  const musicPath =
-    path.join(
-      workDir,
-      "background-music.mp3"
-    );
-
-  try {
-    await retry(
-      () =>
-        downloadFile(
-          url,
-          musicPath
-        ),
-      {
-        attempts:
-          2,
-
-        delayMs:
-          1000,
-
-        label:
-          "Background music download"
-      }
-    );
-
-    return musicPath;
-  } catch (error) {
-    console.error(
-      "Background music unavailable:",
-      error.message
-    );
-
-    return null;
-  }
-}
-
-// ====================================================
-// FINAL RENDER
+// FINAL RENDER — STOCK VIDEO
 // ====================================================
 
 async function renderStockVideo({
@@ -1518,6 +1689,10 @@ async function renderStockVideo({
     }
   );
 }
+
+// ====================================================
+// FALLBACK RENDER
+// ====================================================
 
 async function renderFallbackVideo({
   audioPath,
@@ -1732,11 +1907,10 @@ ${sourceCredits}`.trim();
               cleanedHashtags
                 .map(
                   tag =>
-                    tag
-                      .replace(
-                        "#",
-                        ""
-                      )
+                    tag.replace(
+                      "#",
+                      ""
+                    )
                 )
                 .slice(
                   0,
@@ -1998,7 +2172,7 @@ async function createShort({
       );
 
     // --------------------------------
-    // 1. Content
+    // 1. Content + music mood
     // --------------------------------
 
     console.log(
@@ -2028,6 +2202,10 @@ async function createShort({
             "Content generation"
         }
       );
+
+    console.log(
+      `AI music mood: ${content.musicMood}`
+    );
 
     // --------------------------------
     // 2. Voice
@@ -2106,17 +2284,22 @@ async function createShort({
     }
 
     // --------------------------------
-    // 6. Background music
+    // 6. AI-selected music
     // --------------------------------
 
     console.log(
-      "5/8 Preparing background music..."
+      "5/8 Selecting background music..."
     );
 
-    const musicPath =
+    const music =
       await prepareBackgroundMusic(
-        workDir
+        workDir,
+        content.musicMood
       );
+
+    const musicPath =
+      music?.path ||
+      null;
 
     // --------------------------------
     // 7. Video
@@ -2268,10 +2451,20 @@ async function createShort({
       music:
         Boolean(
           musicPath
-        )
+        ),
+
+      musicMood:
+        music?.mood ||
+        null,
+
+      musicTrack:
+        music?.name ||
+        null
     };
 
-    addHistory(entry);
+    addHistory(
+      entry
+    );
 
     console.log(
       `SUCCESS: ${youtubeVideoId}`
@@ -2300,6 +2493,14 @@ async function createShort({
         Boolean(
           musicPath
         ),
+
+      musicMood:
+        music?.mood ||
+        null,
+
+      musicTrack:
+        music?.name ||
+        null,
 
       durationSeconds:
         actualDuration,
@@ -2522,7 +2723,7 @@ Automatic Shorts Engine 🎥⚡
 </h1>
 
 <p class="subtitle">
-AI → Voice → Stock footage → Captions → Music → YouTube
+AI → Voice → Stock footage → Captions → Smart music → YouTube
 </p>
 
 <div class="card status">
@@ -2582,20 +2783,17 @@ ${
 
 <br>
 
-Music:
-<span class="${
-  process.env
-    .BACKGROUND_MUSIC_URL
-    ? "ok"
-    : ""
-}">
-${
-  process.env
-    .BACKGROUND_MUSIC_URL
-    ? "Configured ✅"
-    : "Optional"
-}
+Music Library:
+<span class="ok">
+Configured ✅
 </span>
+
+<br>
+
+Tracks:
+<strong>
+${Object.keys(MUSIC_LIBRARY).length}
+</strong>
 
 <br>
 
@@ -2723,7 +2921,7 @@ async function createVideo() {
     true;
 
   result.textContent =
-    "Generating content → narration → stock footage → captions → music → video → YouTube...";
+    "AI topic/script → narration → footage → captions → mood-selected music → rendering → YouTube...";
 
   try {
 
@@ -2766,7 +2964,8 @@ async function createVideo() {
           body:
             JSON.stringify({
               topic:
-                topic || undefined,
+                topic ||
+                undefined,
 
               durationSeconds,
 
@@ -2813,7 +3012,10 @@ async function createVideo() {
 
 app.get(
   "/health",
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
     res.json(
       getSystemStatus()
     );
@@ -2822,7 +3024,10 @@ app.get(
 
 app.get(
   "/status",
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
     res.json({
       ...getSystemStatus(),
 
@@ -2839,7 +3044,10 @@ app.get(
 
 app.get(
   "/last-upload",
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
     res.json({
       lastUpload
     });
@@ -2848,7 +3056,10 @@ app.get(
 
 app.get(
   "/history",
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
     res.json({
       count:
         shortHistory.length,
@@ -2860,12 +3071,133 @@ app.get(
 );
 
 // ====================================================
+// MUSIC LIBRARY INFO
+// ====================================================
+
+app.get(
+  "/music-library",
+  (
+    req,
+    res
+  ) => {
+    res.json({
+      success:
+        true,
+
+      tracks:
+        Object.entries(
+          MUSIC_LIBRARY
+        ).map(
+          (
+            [
+              mood,
+              track
+            ]
+          ) => ({
+            mood,
+
+            name:
+              track.name
+          })
+        )
+    });
+  }
+);
+
+// ====================================================
+// MUSIC DOWNLOAD TEST
+// ====================================================
+
+app.get(
+  "/test-music",
+  async (
+    req,
+    res
+  ) => {
+    const workDir =
+      path.join(
+        os.tmpdir(),
+        `music-test-${Date.now()}`
+      );
+
+    try {
+      await fs.promises
+        .mkdir(
+          workDir,
+          {
+            recursive:
+              true
+          }
+        );
+
+      const mood =
+        String(
+          req.query.mood ||
+          "motivational"
+        );
+
+      const music =
+        await prepareBackgroundMusic(
+          workDir,
+          mood
+        );
+
+      return res.json({
+        success:
+          Boolean(music),
+
+        requestedMood:
+          mood,
+
+        selectedMood:
+          music?.mood ||
+          null,
+
+        track:
+          music?.name ||
+          null
+      });
+
+    } catch (error) {
+      return res
+        .status(500)
+        .json({
+          success:
+            false,
+
+          error:
+            error.message
+        });
+
+    } finally {
+      fs.promises
+        .rm(
+          workDir,
+          {
+            recursive:
+              true,
+
+            force:
+              true
+          }
+        )
+        .catch(
+          () => {}
+        );
+    }
+  }
+);
+
+// ====================================================
 // ANALYTICS
 // ====================================================
 
 app.get(
   "/analytics/:videoId",
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
     try {
       const data =
         await getVideoAnalytics(
@@ -2916,7 +3248,10 @@ app.get(
 
 app.get(
   "/test-pexels",
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
     try {
       const query =
         String(
@@ -2937,7 +3272,9 @@ app.get(
 
       return res.json({
         success:
-          Boolean(result),
+          Boolean(
+            result
+          ),
 
         query,
 
@@ -2982,7 +3319,10 @@ app.get(
 
 app.get(
   "/test-voice",
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
     try {
       const speech =
         await openai.audio
@@ -3046,7 +3386,10 @@ app.get(
 
 app.post(
   "/create-short",
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
     try {
       const result =
         await createShort({
@@ -3087,7 +3430,9 @@ app.post(
           : 500;
 
       return res
-        .status(status)
+        .status(
+          status
+        )
         .json({
           success:
             false,
@@ -3106,7 +3451,10 @@ app.post(
 
 app.post(
   "/automation/run",
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
     try {
       const secret =
         req.headers[
@@ -3187,7 +3535,9 @@ app.post(
           : 500;
 
       return res
-        .status(status)
+        .status(
+          status
+        )
         .json({
           success:
             false,
@@ -3205,7 +3555,10 @@ app.post(
 
 app.get(
   "/auth/google",
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
     const authUrl =
       oauth2Client
         .generateAuthUrl({
@@ -3232,11 +3585,15 @@ app.get(
 
 app.get(
   "/auth/google/callback",
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
     try {
       const {
         code
-      } = req.query;
+      } =
+        req.query;
 
       if (!code) {
         return res
@@ -3264,13 +3621,20 @@ app.get(
 
       return res.send(`
 <!doctype html>
+
 <html>
+
 <head>
+
 <meta
 name="viewport"
 content="width=device-width,initial-scale=1"
 />
-<title>YouTube Connected</title>
+
+<title>
+YouTube Connected
+</title>
+
 </head>
 
 <body
@@ -3302,6 +3666,7 @@ Return to automation
 </a>
 
 </body>
+
 </html>
       `);
 
@@ -3325,7 +3690,10 @@ Return to automation
 // ====================================================
 
 app.use(
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
     res
       .status(404)
       .json({
@@ -3371,6 +3739,11 @@ app.listen(
         .PEXELS_API_KEY
         ? "configured"
         : "missing"
+    );
+
+    console.log(
+      "Music library:",
+      `${Object.keys(MUSIC_LIBRARY).length} tracks`
     );
 
     console.log(
